@@ -1,0 +1,32 @@
+# First run: /terrain start 101 1 overworld minecraft:plains
+# Full run:  /terrain start 101,202,303,404,505 10
+collection:
+  dimensions: [overworld, nether, end]
+  excluded-biomes: [minecraft:the_void]
+  # Budgets are per seed/dimension/biome bucket. Shortfalls are recorded.
+  max-candidate-attempts: 160
+  candidates-per-locate: 16
+  locate-radius: 4096
+  locate-horizontal-interval: 32
+  locate-vertical-interval: 32
+  random-origin-range: 60000
+  candidate-radius: 96
+  minimum-center-distance: 48
+  cooldown-ticks: 10
+  # Limits block reads per tick. A single biome locate can still take longer.
+  capture-blocks-per-tick: 1000
+  concurrent-chunk-loads: 2
+  chunk-load-timeout-ticks: 2400
+site:
+  # 3 x 3 horizontal cells, 2 cells high, all air; center has non-air below.
+  clearance-radius: 1
+  clearance-height: 2
+  # false permits naturally occurring water/lava/foliage below the center.
+  # These samples are NOT automatically suitable for a standing NPC.
+  require-solid-support: false
+context:
+  size-x: 41
+  size-y: 25
+  size-z: 41
+preview:
+  blocks-per-tick: 2000

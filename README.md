@@ -1,0 +1,404 @@
+# TerrainLab：自然地形采集与游戏内预览
+
+TerrainLab 是一个独立的 **Paper 26.3 / Java 25** 插件，用于先建立地形数据集，再为后续 NPC 避险实验准备场景。当前阶段只采集方块和生物群系标签，不创建实验 NPC、不引爆 TNT，也不保存动物、怪物或其他来源实体。它与先前的 `NpcLab` 使用不同插件名、命令和数据目录，可以同时安装。
+
+每个样本包含以候选中心为原点的 **25×25×11 核心区域**，以及默认 **41×41×25 上下文区域**。样本保存为 UTF-8 JSON 的 gzip 文件，可以用 Python 直接读取，也可以在游戏内逐个查看或按九宫格分页展示。
+
+**这份数据描述局部地形。画廊提供视觉预览，目前不构成原版物理过程的严格回放。** 例如，海面上方的开阔位置可以被采集，但并不保证村民能在那里站立，也不保证点燃的 TNT 会停留在中心。
+
+## 1. 安装与第一次采集
+
+### 环境
+
+- 服务端：Paper 26.3。本项目编译依赖固定为 `paper-api:26.3.build.218-stable`。
+- Java：JDK 25。Paper 官方当前安装文档将 26.1 及之后版本对应到 Java 25。[Paper 安装说明](https://docs.papermc.io/paper/getting-started/)
+- 客户端：连接该服务器的 Minecraft Java Edition 客户端。
+- 权限：OP，或权限节点 `terrainlab.admin`。采集和状态命令也可在服务器控制台使用；预览命令需要在游戏内执行。
+
+### 使用提供的 JAR
+
+从 [GitHub Releases](https://github.com/ChenXuYangJP/terrain-lab-starter/releases/tag/v0.1.0) 下载预编译的 `terrain-lab-0.1.0.jar` 和 `SHA256SUMS.txt`，放在同一目录下可以先校验文件：
+
+```bash
+sha256sum -c SHA256SUMS.txt
+```
+
+在服务器控制台执行 `stop`，等待服务器正常退出，然后将 JAR 复制到服务器 `plugins` 目录：
+
+```bash
+cp terrain-lab-0.1.0.jar /path/to/paper-server/plugins/
+```
+
+把示例路径改成自己的服务器目录，按原来的方式启动 Paper。首次启动会生成 `plugins/TerrainLab/config.yml`。服务端日志应出现 `TerrainLab ready`。
+
+这个 JAR 是服务端插件，放在 Paper 服务器的 `plugins` 目录，不需要放进客户端。普通 Minecraft 客户端可以连接和观看。
+
+### 先采一个样本
+
+在游戏里依次执行：
+
+```text
+/terrain catalog
+/terrain start 101 1 overworld minecraft:plains
+/terrain status
+```
+
+第一条命令列出运行服务器的目标生物群系数量，并写入 `plugins/TerrainLab/catalog.json`。第二条命令新建一个任务：使用 seed `101`，只在主世界的 `minecraft:plains` 中尝试保存一个合格样本。出现 `Saved sample_...` 后，再执行：
+
+```text
+/terrain list 1
+/terrain show sample_实际样本ID core
+```
+
+把 `sample_实际样本ID` 换成 `/terrain list 1` 输出的完整 ID。预览完成后执行：
+
+```text
+/terrain leave
+```
+
+先确认这一条完整流程成功，再扩大采集规模。这里的“成功”包括保存 gzip、能够读取检查、能够进入预览和离开预览，而不只是服务器接受了命令。
+
+## 2. 采集规模与 biome 数量
+
+不要把早期的“主世界 54 + 下界 5 + 末地 5”固定写进数据集。26.2 新增了 Sulfur Caves，26.3 新增了 Dappled Forest；版本、功能开关和数据包都会影响可用内容。[26.2 官方说明](https://www.minecraft.net/en-us/article/minecraft-java-edition-26-2) · [26.3 官方说明](https://www.minecraft.net/en-us/article/minecraft-java-edition-26-3)
+
+本插件从运行服务器的 biome registry 读取条目，再使用 `minecraft:is_overworld`、`minecraft:is_nether`、`minecraft:is_end` 标签形成采集目标，排除 `minecraft:the_void`。**已注册、属于某个维度标签、能在指定世界中找到合格位置，是三件不同的事。** 标签中有某个 biome，不保证有限搜索预算内能找到它，也不保证该世界的生成器实际会生成它。[Paper Biome API](https://jd.papermc.io/paper/26.3/org/bukkit/block/Biome.html) · [Registry 文档](https://docs.papermc.io/paper/dev/registries/)
+
+在默认 26.3 内容下，可按 56 个主世界、5 个下界、5 个末地，即 **66 个候选目标**做预算；实际数量以你运行 `/terrain catalog` 的输出为准。下面的数字都表示计划配额，最终样本可能有缺额。
+
+| 阶段 | 命令 | 若目标数为 66，计划数量 |
+|---|---|---:|
+| 单样本检查 | `/terrain start 101 1 overworld minecraft:plains` | 1 |
+| 全类型试采 | `/terrain start 101 1` | 66 |
+| 约 500 个样本 | `/terrain start 101 8` | 528 |
+| 五个 seed，每类十个 | `/terrain start 101,202,303,404,505 10` | 3,300 |
+
+`/terrain start` 的完整语法：
+
+```text
+/terrain start <seed1,seed2,...> <每类数量> [all|overworld|nether|end] [biome_key]
+```
+
+seed 使用十进制有符号 64 位整数。最多接受 20 个不同 seed；每类配额为 1～100。省略维度时使用配置中的维度列表。输入多个 seed 时，逗号两侧不要加空格。
+
+每次 `start` 都创建一个新的 `job_id`，并使用该任务独立的来源世界。即使 seed 一样，新任务也不会接着旧任务计数。要继续旧任务，使用 `resume`。
+
+## 3. 位置筛选实际保证什么
+
+默认筛选条件是：中心附近 **3×3 的水平范围、向上 2 格全部为空气**，中心正下方一格不是空气。整块 25×25 区域不需要全部开阔，所以周围的坡地、树木、岩壁、水面和洞穴仍会保留下来。
+
+默认 `site.require-solid-support: false`，因此正下方可以是水、熔岩、树叶等自然方块。这样能保留水域和植被场景，避免为了凑齐 biome 配额而人工铺平台。样本会记录：
+
+- `capture_eligible: true`：满足这次地形采集规则。
+- `support_blockdata`、`support_is_liquid`、`support_kind`：中心下方的实际方块及分类。
+- `require_solid_support`、`clearance_radius`、`clearance_height`：此次任务使用的筛选条件。
+
+这些字段**不等于 NPC 可站立、逃生路径存在，或 TNT 可稳定放置**。后续创建 NPC 时需要额外检查实体碰撞箱、脚下支撑、头顶空间、液体与危险方块、可达路径和起始距离。
+
+如果希望只接受保守的完整方块支撑，可以在 `plugins/TerrainLab/config.yml` 中设置：
+
+```yaml
+site:
+  clearance-radius: 1
+  clearance-height: 2
+  require-solid-support: true
+```
+
+此时使用完整立方体碰撞形状判断支撑，而不是只看 `Material.isSolid()`。这仍然只是局部几何条件，不自动排除一切有伤害或特殊行为的方块，也不会自动生成“安全 NPC 起点”。修改配置并重启服务器后，新任务使用新设置；恢复已有任务使用其 checkpoint 中保存的设置。
+
+候选中心会留出完整 context 的上下空间，避免在世界高度边界外静默补空气。下界候选中心另限制在 `Y ≤ 115`，避免把基岩顶面以上的大片空气当作常规下界场景。
+
+海洋可以采到水面上方的空气位置。不过，核心区域只包含中心以下 5 格，**不能用它推断整个深海的深度、海底结构或完整水柱**。默认 context 向下也只有 12 格；如果研究问题依赖更深环境，需要更大的上下文或保留原始来源世界。
+
+## 4. 采样、缺额与独立性
+
+采样过程使用有限预算：先选随机搜索原点，调用 biome 定位；再在定位结果附近选候选 X/Z 列；对每列的合法 Y 区间逐层检查，并用 reservoir sampling 在该列满足条件的高度中选一个。它可以覆盖地下 biome，而不是始终只取最高表面。
+
+**这不是整个世界或整个 biome 上的均匀随机采样。** 定位算法、搜索范围、邻域半径和“有空气开阔位置”的资格条件都会影响分布。reservoir sampling 的均匀性仅针对已经选中的那一列中的合格高度。
+
+默认每个 `seed × dimension × biome` 桶最多尝试 160 个候选；定位次数也有上限。找不到目标、候选不合格、中心太近、context 重叠或预算用尽，都可能产生缺额。程序不会修改地形来补数。可以用：
+
+```text
+/terrain status
+```
+
+查看当前目标、尝试次数和拒绝计数。每个任务还输出：
+
+```text
+plugins/TerrainLab/jobs/<job_id>-report.csv
+```
+
+CSV 中包含 `seed, dimension, biome, target, accepted, shortfall, candidates, locates, finished, rejections`。一个任务显示 `complete`，表示所有桶都结束了尝试，不保证每个桶都达到配额。
+
+默认最小中心距离为 48 格，同时拒绝上下文包围盒重叠。这些检查只针对**同一任务内、同一 seed 和维度**的已有样本。它们降低空间重复，但不能证明统计独立；不同任务仍可能生成相同或相似地形。
+
+`terrain_sha256` 用于标识相同的上下文方块数据，当前不会仅因为 hash 相同就自动丢掉样本。同样的平地可能出现在不同 biome 中；是否合并需要结合研究目标决定。这个 hash 不包含 biome 标签，也不衡量“近似相同”。
+
+以后做训练/验证/测试划分时，优先按 seed 或完整场景分组；同一地形的不同 NPC 起点、不同动作、重复爆炸试验应留在同一个分组。不要把相邻 tick 或同一场景的不同试验随机拆到训练和测试两侧。各 biome 相同配额适合比较覆盖情况，但不代表自然世界出现频率；报告效果时应区分按 biome 平均和按实际部署分布加权。
+
+## 5. 暂停、恢复与任务文件
+
+```text
+/terrain pause
+/terrain resume
+/terrain resume job_具体任务ID
+/terrain status
+```
+
+`pause` 停止继续推进采样，但已经开始的那个样本可以继续读取、压缩并保存。看到状态不再忙碌后再启动新任务。`stop` 是 `pause` 的命令别名，不代表删除数据。
+
+不带 ID 的 `resume` 读取 `latest-job.txt` 指向的任务；带 ID 时恢复指定 checkpoint。若程序已发布一个完整样本，但尚未来得及把它计入任务，恢复逻辑会核对样本和任务信息后补记。未完成发布的临时文件不算样本。
+
+任务文件保存了采集设置和 Minecraft 版本。恢复时不会悄悄采用新配置；Minecraft 版本改变时应启动新任务，避免混合版本。
+
+| 路径 | 内容 |
+|---|---|
+| `plugins/TerrainLab/config.yml` | 新任务默认设置 |
+| `plugins/TerrainLab/catalog.json` | 最近一次导出的 registry 与维度标签 |
+| `plugins/TerrainLab/samples/sample_*.json.gz` | 完整地形样本 |
+| `plugins/TerrainLab/jobs/job_*.json.gz` | 任务 checkpoint |
+| `plugins/TerrainLab/jobs/job_*-report.csv` | 各桶产量、缺额和拒绝计数 |
+| `plugins/TerrainLab/latest-job.txt` | 最近任务 ID |
+| `plugins/TerrainLab/gallery-state.yml` | 预览区域恢复信息 |
+
+来源世界和预览世界还会占用 Minecraft 的世界存档空间。插件使用自己的世界 key、所有权标记和 UUID 校验管理这些世界；遇到不能确认归属的已有世界会拒绝接管。暂停、换页和结束任务不会自动删除来源存档。
+
+## 6. 核心区域和上下文区域
+
+下表的尺寸按 **X × Z × Y** 表述；文件中的数组形状按 **Y、Z、X** 记录。
+
+| 区域 | 空间尺寸 | 相对中心范围 | `shape_yzx` | 格数 |
+|---|---|---|---|---:|
+| core | 25×25×11 | X/Z：−12～12；Y：−5～5 | `[11,25,25]` | 6,875 |
+| context | 41×41×25 | X/Z：−20～20；Y：−12～12 | `[25,41,41]` | 42,025 |
+
+**core 完全包含在 context 内。** 默认实际覆盖的唯一空间是 42,025 格，不能再加上 6,875 当作新的空间。为了方便模型直接读取核心窗口，文件同时提供两份数组，因此文件中会重复保存 core 对应的索引。
+
+25×25×11 可以作为固定模型输入，但不能单凭这个尺寸断言其覆盖了全部 TNT 影响。Paper API 中 `power=4F` 对应 TNT，并不意味着所有方块破坏、实体伤害、击退和后续地形变化都被严格限制在“4 格半径”内。[Paper World API](https://jd.papermc.io/paper/26.3/org/bukkit/World.html)
+
+特别是上下各 5 格会裁掉部分洞顶、下方地层、流体和支撑结构。逃生路径可能绕出水平边界；爆炸后掉落、流动或重力方块还可能把边界影响继续传进来。**41×41×25 也只是当前保存上下文的工程起点，没有经验证的“足够大”保证。** 未来要用原位置或更大上下文做对照试验，记录 NPC、路径和方块变化是否触及边缘，必要时扩大范围或将试验标成边界受限。
+
+## 7. 文件格式与信息保真范围
+
+每个样本是 `sample_<安全ID>.json.gz`。gzip 解压后为 UTF-8 JSON，顶层键固定为：
+
+```text
+schema_version
+id
+metadata
+core
+context
+```
+
+当前 `schema_version` 为 `1`。每个 grid 的键如下：
+
+| 字段 | 含义 |
+|---|---|
+| `shape_yzx` | `[sizeY,sizeZ,sizeX]` |
+| `min_offset_xyz` | 最小相对坐标 `[minDx,minDy,minDz]` |
+| `axis_order` | 固定为 `"y,z,x"`，X 变化最快 |
+| `palette` | 完整 BlockData 字符串列表，例如 `minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]` |
+| `indices` | 每格指向 `palette` 的非负整数 |
+| `biome_palette` | namespaced biome key 列表 |
+| `biome_indices` | 每格对应的 biome 标签索引 |
+
+给定相对坐标 `(dx,dy,dz)`，索引为：
+
+```python
+index = ((dy - minDy) * sizeZ + (dz - minDz)) * sizeX + (dx - minDx)
+blockdata = palette[indices[index]]
+```
+
+对 core，可直接写成：
+
+```python
+index = ((dy + 5) * 25 + (dz + 12)) * 25 + (dx + 12)
+```
+
+不要把不同 grid 的 palette 数字当作全局方块 ID。索引 `0` 在两个文件里可能指向不同方块。需要先查各自的 palette；检查 core/context 一致性时也按实际字符串比较。
+
+### 元数据
+
+`metadata` 保存 seed、原始世界与维度、中心绝对坐标、Minecraft/Paper/data version、采集起止时间和 tick、世界时间与天气、难度、gamerules、功能开关、已启用数据包名、插件列表、筛选规则和采样设置等。seed 始终是**十进制字符串**，避免被其他语言的浮点 JSON 读取器舍入。
+
+数据包目前只保存名称，没有保存内容摘要；`datapack_content_fingerprint` 明确记为未知。因此“seed 相同”不等于在不同版本、不同数据包或不同生成配置下能重建相同世界。
+
+biome 有两个相关概念：中心采样资格按 `getComputedBiome` 判断，并保存 `center_computed_biome`；每格数组保存 `World.getBiome` 返回的底层 noise biome 标签，中心另有 `center_noise_biome`。两者在边界附近可能不同，不能不加区分地把数组当成每格 F3 显示结果。[Paper RegionAccessor API](https://jd.papermc.io/paper/26.3/org/bukkit/RegionAccessor.html)
+
+以下字段是当前格式的明确约束：
+
+```json
+{
+  "entities_omitted": true,
+  "block_entity_nbt_omitted": true,
+  "scheduled_ticks_omitted": true,
+  "fidelity": "blockdata_only",
+  "capture_atomic": false
+}
+```
+
+方块朝向、阶梯形状、含水状态等 BlockData 会保存。箱子的库存、告示牌文字、刷怪笼设置等额外方块实体 NBT 不保存；实体、计划中的方块/流体 tick、运行时随机状态也不保存。体素采集跨多个服务端 tick 分批进行，因此记录了开始/结束 tick，不能称为某一个瞬间的原子世界快照。
+
+文件通过同目录临时 gzip 完整写入、关闭后，再以不覆盖目标的硬链接发布。读者不会把半写入文件当成已完成样本；已存在的样本 ID 会拒绝覆盖。这个实现要求样本所在文件系统支持硬链接，不把突然断电后的磁盘持久性作为保证。
+
+`metadata.terrain_sha256` 对完整 context 的尺寸、偏移和按 Y/Z/X 顺序解码后的 BlockData 做 SHA-256；如果没有 context，则对 core 做。它与 palette 排序无关，不包含 biome 和其他 metadata。Java 与 Python 读取器都会核验已声明的 hash。
+
+## 8. 用 Python 检查样本
+
+不需要安装 NumPy 或启动 Minecraft。系统有 Python 3 即可：
+
+```bash
+python3 tools/inspect_terrain.py /path/to/paper-server/plugins/TerrainLab/samples/sample_实际ID.json.gz
+```
+
+需要机器可读摘要时：
+
+```bash
+python3 tools/inspect_terrain.py /path/to/sample_实际ID.json.gz --json
+```
+
+工具检查 gzip 完整性、JSON 字段、seed 与坐标类型、数组尺寸、palette 索引、core/context 逐格一致性和已声明的地形 hash，并输出中心方块、中心底层 biome、两层尺寸和 hash。检查成功退出码为 `0`；不合法为 `2`。通过结构检查不表示 Minecraft 物理回放已经验证。
+
+在自己的 Python 程序里读取核心数组：
+
+```python
+import gzip
+import json
+
+with gzip.open("sample_实际ID.json.gz", "rt", encoding="utf-8") as f:
+    sample = json.load(f)
+
+grid = sample["core"]
+dy, dz, dx = 0, 0, 0
+index = ((dy + 5) * 25 + (dz + 12)) * 25 + (dx + 12)
+center_block = grid["palette"][grid["indices"][index]]
+center_biome = grid["biome_palette"][grid["biome_indices"][index]]
+seed = int(sample["metadata"]["seed"])
+print(center_block, center_biome, seed)
+```
+
+这个简短示例只演示字段读取；批量处理前应先通过检查器验证输入。
+
+## 9. 单独查看与九宫格展示
+
+```text
+/terrain list 1
+/terrain show sample_实际ID core
+/terrain show sample_实际ID context
+/terrain gallery 1 core
+/terrain gallery 2 core
+/terrain gallery 1 context
+/terrain goto 5
+/terrain leave
+```
+
+`list` 每页列出 10 个 ID；`gallery` 每页最多放 9 个样本，编号 1～9。页码从 1 开始，样本按 ID 排序，不保证与采集时间顺序一致。`show` 只展示指定样本，省略模式时默认为 `core`。`goto` 跳到当前页指定位置，`leave` 恢复进入预览前的返回位置和游戏模式。
+
+预览使用单个共享的专用 NORMAL 世界，所有来源维度都摆到约 `Y=96` 的展示高度；实际锚点保留源坐标模 4 的对齐。九宫格中心间隔为 64 格。玩家以 spectator 模式观看，插件分批粘贴方块，并尽量抑制预览中的爆炸、放置破坏、流动和方块更新。换页会更新共享展示，不是每位玩家各有一份独立场景。
+
+保持 biome 格点对齐有助于展示，但预览世界的 seed、绝对坐标、维度和周围环境已变化，所以 F3 的 computed biome、混色、天空与光照仍可能不同。核对原始标签时看样本 metadata 和 `biome_indices`。
+
+预览省略了额外 NBT 和计划 tick，也没有复制来源维度的完整运行状态。关闭随机 tick、取消部分事件、用 `applyPhysics=false` 粘贴，均不能证明所有原版机制都被冻结。**请把它用于观察地形形状、比较遮挡和检查采样质量；未来的爆炸实验需要专门的回放与复位流程。**
+
+## 10. 性能、存储和配置
+
+区块生成、来源世界保存和 biome 搜索通常比压缩一个局部 JSON 更重。来源世界存档可能远大于样本文件；新的任务会创建新的来源世界。没有依据机器性能、目标分布和实际运行结果，不能承诺 528 或 3,300 个样本的完成时间。
+
+默认设置包括：
+
+| 配置项 | 默认值 | 作用 |
+|---|---:|---|
+| `collection.max-candidate-attempts` | 160 | 每个桶的候选预算 |
+| `collection.candidates-per-locate` | 16 | 每次定位附近的候选数 |
+| `collection.locate-radius` | 4096 | 单次定位半径 |
+| `collection.random-origin-range` | 60000 | 随机定位原点范围 |
+| `collection.candidate-radius` | 96 | 定位点附近的候选范围 |
+| `collection.minimum-center-distance` | 48 | 同任务同 seed/维度的最小中心距离 |
+| `collection.capture-blocks-per-tick` | 1000 | 每 tick 的体素读取数量上限 |
+| `collection.concurrent-chunk-loads` | 2 | 并行区块加载数量上限 |
+| `collection.cooldown-ticks` | 10 | 采集步骤之间的节流 |
+| `preview.blocks-per-tick` | 2000 | 每 tick 的预览粘贴数量上限 |
+
+体素读取还受每 tick 的时间预算约束；世界和方块访问留在服务端主线程，后台只压缩、校验和写入已经复制出的纯数据。但 `locateNearestBiome` 本身是同步调用，限半径和增加 cooldown 不能保证单次调用不造成卡顿。[Paper World API](https://jd.papermc.io/paper/26.3/org/bukkit/World.html)
+
+如果先运行一个样本就明显卡顿，优先缩小定位半径或候选搜索规模，观察服务器状态后再决定是否扩大；更小预算也可能增加缺额。不要一次把所有预算调大来追求凑满配额。
+
+任务运行期间，插件会暂时禁止 Paper 在服务器无人时自动暂停，以免采集停止；暂停、完成或插件关闭时会释放这个设置。服务器进程仍必须保持运行。
+
+context 的 X/Z 可配置为 25～59 的奇数，Y 可配置为 11～63 的奇数，保证包含固定 core 并适配当前画廊。修改范围会改变存储、生成负担和样本选择条件，应启动新任务记录新设置。
+
+## 11. 在 VS Code 修改与构建
+
+用 VS Code 打开整个 `terrain-lab-starter` 文件夹，编辑 `.java`、`config.yml` 或 `plugin.yml`。JAR 是编译后的产物，通常不直接编辑里面的字节码。
+
+| 文件 | 主要职责 |
+|---|---|
+| `src/main/java/io/github/terrainlab/TerrainLabPlugin.java` | 命令、采集状态机、checkpoint |
+| `BiomeCatalog.java` | 运行时 biome registry 与维度标签 |
+| `SiteFinder.java` | 候选中心、空气空间和支撑筛选 |
+| `OwnedWorlds.java` | 专用来源/预览世界与所有权核验 |
+| `TerrainSnapshot.java` | 纯数据模型、坐标索引与一致性验证 |
+| `SnapshotIO.java` | gzip JSON、原子发布、hash 与读取 |
+| `Gallery.java` | 游戏内单样本和分页展示 |
+| `tools/inspect_terrain.py` | 无 Minecraft 依赖的样本检查 |
+| `tools/test_snapshot_io.py` | Java/Python 格式与文件行为自测 |
+| `tools/test_owned_metadata.py` | Paper 世界身份元数据 NBT 解析与拒绝逻辑自测 |
+| `pom.xml` | Java、Paper API 和 Gson 构建依赖 |
+
+确保 `java -version`、`javac -version` 和 `mvn -version` 都使用 JDK 25，再在项目根目录执行：
+
+```bash
+mvn package
+```
+
+新 JAR 位于：
+
+```text
+target/terrain-lab-0.1.0.jar
+```
+
+修改代码后的安装操作应复制这个新的 `target` 文件；`dist` 中的预编译副本不会因你编辑源码而自动更新。
+
+```bash
+cp target/terrain-lab-0.1.0.jar /path/to/paper-server/plugins/
+```
+
+复制前正常停止服务器，复制后重新启动。源码编译时依赖 Gson 2.14.0 和 Paper API；运行时由 Paper 提供对应依赖。
+
+可以单独执行不依赖 Bukkit 的格式自测：
+
+```bash
+python3 tools/test_snapshot_io.py --jdk /path/to/jdk-25 --gson /path/to/gson-2.14.0.jar
+```
+
+如果 `JAVA_HOME` 已指向 JDK 25，且 Maven 缓存中有 Gson 2.14.0，通常直接运行 `python3 tools/test_snapshot_io.py` 即可。测试会在临时目录真实编译两个 Java 数据类并写入样本，再用 Python 读取，不会操作服务器世界。
+
+## 12. 验证范围与后续实验
+
+当前交付的验证范围是项目编译，以及纯数据的 Java/Python 自测。自测覆盖 gzip/UTF-8 往返、64 位 seed、原始 BlockData、所有核心索引、palette 重排不影响 hash、裁切一致性、坏 gzip、错误 schema、负索引、NaN、重复 JSON key、拒绝覆盖和并发原子发布。
+
+已实际使用 JDK 25 和 Paper API `26.3.build.218-stable` 完成 Maven 构建。8 项快照格式测试全部通过；另有 13 项世界身份元数据解析测试通过，覆盖标准 NBT 的 UUID 读取和损坏、过大、过深等输入的拒绝。后者可以在 Maven 构建后运行：
+
+```bash
+python3 tools/test_owned_metadata.py --jdk /path/to/jdk-25 --maven-repo /path/to/local-maven-repository
+```
+
+元数据测试使用临时合成 NBT 文件和实际编译类，不启动服务器，也不代表真实世界创建与重载已验证。
+
+**没有在真实 Paper 服务器里完成端到端运行验证，也没有随项目提供真实采样数据。** 测试中的合成数据只是临时格式夹具，不是从 Minecraft 世界采集的训练场景。因此应从第一节的单个 plains 样本开始验证你本机的版本、世界生成、保存、预览和返回流程。
+
+后续接入 NPC 避险时，需要增加：实际可站立起点与目标点、实体/路径边界记录、保留原维度和绝对高度的实验世界、每次试验的完整复位、TNT 与 NPC 的初始状态、动作请求与实际运动的区分、伤害后的真实生命值、终止原因和多次重复试验。对于水域、熔岩、重力方块、红石或额外 NBT 相关场景，还需要专门设计可重复的回放策略。
+
+固定 seed 有助于记录世界生成来源，但不单独保证运行时 AI、爆炸随机过程和计划更新完全相同。只有把回放条件、缺失信息和边界影响都纳入试验，后续采集到的行动结果才适合可靠比较。
+
+## 官方参考
+
+- [Minecraft Java Edition 26.2：Sulfur Caves](https://www.minecraft.net/en-us/article/minecraft-java-edition-26-2)
+- [Minecraft Java Edition 26.3：Dappled Forest](https://www.minecraft.net/en-us/article/minecraft-java-edition-26-3)
+- [Paper 安装与 Java 版本要求](https://docs.papermc.io/paper/getting-started/)
+- [Paper Registry API](https://docs.papermc.io/paper/dev/registries/)
+- [Paper 26.3 Biome](https://jd.papermc.io/paper/26.3/org/bukkit/block/Biome.html)
+- [Paper 26.3 BiomeTagKeys](https://jd.papermc.io/paper/26.3/io/papermc/paper/registry/keys/tags/BiomeTagKeys.html)
+- [Paper 26.3 World：定位、区块、爆炸等 API](https://jd.papermc.io/paper/26.3/org/bukkit/World.html)
+- [Paper 26.3 RegionAccessor：noise/computed biome](https://jd.papermc.io/paper/26.3/org/bukkit/RegionAccessor.html)
+- [Paper 26.1：多世界存储结构变化](https://papermc.io/news/26-1/)

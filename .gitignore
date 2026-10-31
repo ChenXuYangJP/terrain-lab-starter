@@ -1,0 +1,12 @@
+target/
+dist/
+server/
+run/
+data/
+logs/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+!.env.example
