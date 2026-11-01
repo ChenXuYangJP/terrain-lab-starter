@@ -1,0 +1,18 @@
+# World seeds for /terrain startyml <per-biome> [all|overworld|nether|end] [biome_key].
+# With the five sample seeds below, /terrain startyml 10 is the same as
+#   /terrain start 101,202,303,404,505 10
+#
+# Rules (same as /terrain start):
+# - decimal signed 64-bit integers; 1 to 20 distinct seeds; duplicates are ignored
+# - quote every seed, e.g. "-4172144997902289642", so YAML keeps it exactly;
+#   unquoted numbers with a leading zero are read as octal, and very large ones
+#   may not be read as integers at all
+# - this file is read each time /terrain startyml runs; no restart is needed
+#
+# Uncomment the list below and edit it:
+# seeds:
+#   - "101"
+#   - "202"
+#   - "303"
+#   - "404"
+#   - "505"

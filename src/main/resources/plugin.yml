@@ -1,5 +1,5 @@
 name: TerrainLab
-version: '0.2.0'
+version: '0.3.0'
 main: io.github.terrainlab.TerrainLabPlugin
 api-version: '26.3'
 description: Collect natural terrain snapshots and inspect them in a gallery.

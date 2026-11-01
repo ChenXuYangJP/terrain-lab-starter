@@ -19,7 +19,7 @@ Each sample contains a **25×25×11 core region** with the candidate center as i
 
 ### Using the provided JAR
 
-Download the prebuilt `terrain-lab-0.2.0.jar` and `SHA256SUMS.txt` from [GitHub Releases](https://github.com/ChenXuYangJP/terrain-lab-starter/releases/tag/v0.2.0). With both in the same directory, you can verify the file first:
+Download the prebuilt `terrain-lab-0.3.0.jar` and `SHA256SUMS.txt` from [GitHub Releases](https://github.com/ChenXuYangJP/terrain-lab-starter/releases/tag/v0.3.0). With both in the same directory, you can verify the file first:
 
 ```bash
 sha256sum -c SHA256SUMS.txt
@@ -28,12 +28,12 @@ sha256sum -c SHA256SUMS.txt
 Run `stop` in the server console, wait for the server to exit cleanly, then copy the JAR into the server's `plugins` directory:
 
 ```bash
-cp terrain-lab-0.2.0.jar /path/to/paper-server/plugins/
+cp terrain-lab-0.3.0.jar /path/to/paper-server/plugins/
 ```
 
 Change the example path to your own server directory and start Paper as usual. The first start generates `plugins/TerrainLab/config.yml`. The server log should show `TerrainLab ready`.
 
-When upgrading from an older version, delete the old `terrain-lab-0.1.0.jar` from `plugins` before copying the new JAR; otherwise Paper finds two plugins with the same name and refuses to load both. The config, samples and job files in `plugins/TerrainLab/` are kept.
+When upgrading from an older version, delete the old JAR (such as `terrain-lab-0.2.0.jar`) from `plugins` before copying the new JAR; otherwise Paper finds two plugins with the same name and refuses to load both. The config, samples and job files in `plugins/TerrainLab/` are kept, and jobs started with an older version can still be resumed.
 
 This JAR is a server plugin. It goes in the Paper server's `plugins` directory, not into the client. A regular Minecraft client can connect and watch.
 
@@ -86,6 +86,70 @@ Full syntax of `/terrain start`:
 Seeds are decimal signed 64-bit integers. Up to 20 distinct seeds are accepted, and the per-type quota is 1–100. If the dimension is omitted, the dimension list from the config is used. When entering multiple seeds, do not put spaces around the commas.
 
 Every `start` creates a new `job_id` and uses that job's own source worlds. Even with the same seed, a new job does not continue the old job's counts. To continue an old job, use `resume`.
+
+### Reading seeds from worldseeds.yml
+
+You can also keep the seeds in `plugins/TerrainLab/worldseeds.yml` and start a job with `startyml`:
+
+```text
+/terrain startyml <per_biome_count> [all|overworld|nether|end] [biome_key]
+```
+
+The file is created the first time the plugin starts. It contains only comments and a commented-out sample. Uncomment and edit the `seeds` list:
+
+```yaml
+seeds:
+  - "101"
+  - "202"
+  - "303"
+  - "404"
+  - "505"
+```
+
+With that list, `/terrain startyml 10` is exactly the same as `/terrain start 101,202,303,404,505 10`, and the optional dimension and biome arguments work the same way. The seed rules match `start`: decimal signed 64-bit integers, 1–20 of them, with duplicates ignored. Quote every seed: YAML reads an unquoted number with a leading zero as octal, and very large numbers may not be read as integers at all. The file is re-read every time `startyml` runs, so no server restart is needed.
+
+### Continuing collection: -continue
+
+Without `-continue`, a new job is independent of earlier ones: its per-biome count covers only that job, and the candidate search is seeded only by world seed, biome and dimension. A new job with the same seeds therefore retraces the earlier job's search and collects the same positions first. This is deliberate, for reproducibility.
+
+Add `-continue` at the end of `start` or `startyml` to build on the samples you already have:
+
+```text
+/terrain startyml 9 -continue
+/terrain start 101,202 9 overworld -continue
+```
+
+- **Top up to N.** Existing samples count toward the per-biome number, and each seed × dimension × biome only collects the difference. For example, if seed 101 already has 1 plains sample, `startyml 9 -continue` collects 8 more, for 9 in total; combinations that already have 9 or more are skipped. Combinations that fell short last time because no good position was found are retried, with a fresh candidate budget. Repeated positions count once. If every combination is already full, the command refuses to start.
+- **Avoid existing centers.** The existing samples are the ones listed in `samplingseed.yml` (from the job records in `jobs/`). New centers follow the same rules against them as within a job: at least 48 blocks apart in the same dimension, with no overlapping context regions, regardless of biome. Candidates rejected for this appear in the report CSV as `near_or_overlapping_earlier_job_sample`.
+- **A fresh search order.** A continuation job uses a new random salt, so it doesn't retrace earlier jobs. The salt is saved in the job file, so `resume` behaves the same.
+
+Right after the server starts, the plugin first reads all job records; until then, `-continue` asks you to retry shortly. After `clearsamples` there are no existing samples, so `-continue` behaves like a plain job (with a fresh search order).
+
+### samplingseed.yml: record of sampling centers
+
+The plugin maintains `plugins/TerrainLab/samplingseed.yml`, which lists the center coordinate and terrain type of every saved sample, grouped by world seed:
+
+```yaml
+world_seeds:
+  "101":
+    - sample: "sample_a0535c4b703a358872cadc05"
+      job: "job_mhf2k3ab_1a2b3c4d"
+      dimension: "overworld"
+      biome: "minecraft:plains"
+      center: [1234, 72, -567]
+```
+
+`center` is the block position of the sample center in that seed's dimension, the same as `source_origin_xyz` in the sample metadata; `biome` is the requested biome the center was accepted for. The file is built from the job checkpoints in `jobs/`, covering every job started with `start` or `startyml`. It is rewritten in full at server start and after every saved sample, so manual edits are overwritten, and deleting a sample file does not remove its entry. To find the terrain again by coordinates in another world, you also need the same Minecraft version, data packs and generation settings (see section 7).
+
+To check whether any saved centers are too close together, run the overlap checker on this file. It needs only Python 3:
+
+```bash
+python3 tools/check_sample_overlap.py /path/to/paper-server/plugins/TerrainLab/samplingseed.yml
+python3 tools/check_sample_overlap.py /path/to/samplingseed.yml --json
+python3 tools/check_sample_overlap.py /path/to/samplingseed.yml -moveout
+```
+
+Two samples overlap when they share a world seed and a dimension and their 25 × 25 × 11 core boxes share at least one block. The default mode lists every overlapping pair with the line numbers; `--json` prints the same pairs as JSON. `-moveout` keeps the first sample of each pair (in file order) and moves the others into `samplingseed_overlaped.yml` next to it, appending if that file exists. Because the plugin rewrites `samplingseed.yml` at server start and after every saved sample, the moved entries come back afterwards; sample files and job checkpoints are never touched. Exit status: 0 no overlaps (or `-moveout` succeeded), 1 overlaps found, 2 unreadable or malformed file or failed write.
 
 ## 3. What site filtering actually guarantees
 
@@ -164,8 +228,22 @@ Job files store the collection settings and the Minecraft version. Resume never 
 | `plugins/TerrainLab/jobs/job_*-report.csv` | Per-bucket yield, shortfalls and rejection counts |
 | `plugins/TerrainLab/latest-job.txt` | Most recent job ID |
 | `plugins/TerrainLab/gallery-state.yml` | Preview region recovery information |
+| `plugins/TerrainLab/worldseeds.yml` | World seed list for `startyml` (edited by you) |
+| `plugins/TerrainLab/samplingseed.yml` | Sampling center coordinates and terrain types, grouped by world seed (generated from job checkpoints) |
 
 Source worlds and the preview world also take up space in Minecraft's world save. The plugin manages these worlds with its own world keys, ownership markers and UUID checks, and refuses to take over an existing world whose ownership it cannot confirm. Pausing, changing pages and finishing jobs do not automatically delete source saves.
+
+### Clearing all samples
+
+```text
+/terrain clearsamples
+/terrain clearsamples confirm <code>
+/terrain clearsamples cancel
+```
+
+The first step lists how many files will be deleted and gives a 6-character confirmation code. The code is valid for 60 seconds and only for the same player (or the console). Nothing is deleted until the second step repeats the code; a wrong or expired code cancels the request, and you start again from the first step. Clearing is refused while a job is running or busy, so run `/terrain pause` and wait first.
+
+Deletion is **permanent** and covers: every sample in `samples/` (including temporary files left by interrupted saves), the job checkpoints and report CSVs in `jobs/`, and `latest-job.txt`. `samplingseed.yml` is then rewritten empty, and `/terrain resume` has no job left to resume. `worldseeds.yml`, `config.yml`, `catalog.json` and the preview state are kept. The source and preview world saves are not deleted either; freeing that disk space has to be done separately. Blocks already pasted in the preview stay until the next `show` or `gallery`.
 
 ## 6. Core and context regions
 
@@ -375,8 +453,10 @@ Open the whole `terrain-lab-starter` folder in VS Code and edit the `.java` file
 | `OwnedWorlds.java` | Dedicated source/preview worlds and ownership verification |
 | `TerrainSnapshot.java` | Pure data model, coordinate indexing and consistency validation |
 | `SnapshotIO.java` | gzip JSON, atomic publishing, hashing and reading |
+| `SeedFiles.java` | Reads `worldseeds.yml` and generates `samplingseed.yml` |
 | `Gallery.java` | In-game single-sample and paged display, sandbox play mode |
 | `tools/inspect_terrain.py` | Sample inspection with no Minecraft dependency |
+| `tools/check_sample_overlap.py` | Finds sampling centers in `samplingseed.yml` whose core boxes overlap |
 | `tools/test_snapshot_io.py` | Java/Python format and file behavior self-tests |
 | `tools/test_owned_metadata.py` | Self-tests for parsing and rejecting Paper world identity metadata NBT |
 | `pom.xml` | Java, Paper API and Gson build dependencies |
@@ -391,13 +471,13 @@ mvn package
 The new JAR is at:
 
 ```text
-target/terrain-lab-0.2.0.jar
+target/terrain-lab-0.3.0.jar
 ```
 
 After changing code, install by copying this new file from `target`. The prebuilt copy in `dist` is not updated when you edit the source.
 
 ```bash
-cp target/terrain-lab-0.2.0.jar /path/to/paper-server/plugins/
+cp target/terrain-lab-0.3.0.jar /path/to/paper-server/plugins/
 ```
 
 Stop the server cleanly before copying, and restart it afterwards. Compiling from source depends on Gson 2.14.0 and the Paper API; at runtime, Paper provides these dependencies.
@@ -424,7 +504,7 @@ The metadata tests use temporary synthetic NBT files and the actual compiled cla
 
 **No end-to-end run has been completed on a real Paper server, and no real sampled data ships with the project.** The synthetic data in the tests is only a temporary format fixture, not training scenes captured from a Minecraft world. So start with the single plains sample from section 1 to verify your local version, world generation, saving, preview and return flow.
 
-In 0.2.0 the preview sandbox passes the Maven build and the self-tests above. `play`, `tnt`, `villagerhp` and `reset` have been run on a local Paper 26.3 server with no errors in the log; `villagerai` has not yet been run in game. The bedrock shell, the edit range, explosions and the villager behaviour have not been systematically verified. When you first use it, follow section 9 on a single sample to confirm they behave as expected.
+0.3.0 passes the Maven build and the self-tests above. On a local Paper 26.3 server, `startyml`, `-continue` and `clearsamples` have been run, and `tools/check_sample_overlap.py` has been run on the resulting `samplingseed.yml`. The preview sandbox commands `play`, `tnt`, `villagerai`, `villagerhp` and `reset` have also been run there. The server log shows no TerrainLab errors. The bedrock shell, the edit range and explosions have not been systematically verified. When you first use the sandbox, follow section 9 on a single sample to confirm it behaves as expected.
 
 When NPC hazard avoidance is added later, it will need: start and goal points where an NPC can actually stand, records of entity and path boundaries, an experiment world that keeps the original dimension and absolute height, a full reset for every trial, the initial state of TNT and NPCs, a distinction between requested actions and actual motion, real health after damage, termination reasons, and repeated trials. Scenes involving water, lava, gravity blocks, redstone or extra NBT also need a dedicated, repeatable replay strategy.
 
