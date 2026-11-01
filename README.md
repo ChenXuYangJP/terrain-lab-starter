@@ -151,6 +151,21 @@ python3 tools/check_sample_overlap.py /path/to/samplingseed.yml -moveout
 
 两个样本属于同一世界 seed 和同一维度，且 25 × 25 × 11 的核心区域至少共有一个方块时，视为重叠。默认模式列出每一对重叠样本及其行号；`--json` 以 JSON 输出同样的结果。`-moveout` 保留每对中（按文件顺序）的第一个样本，把其余样本移到同目录的 `samplingseed_overlaped.yml`，该文件已存在时追加写入。由于插件在服务器启动时和每保存一个样本后都会重写 `samplingseed.yml`，被移出的条目之后会重新出现；样本文件和任务 checkpoint 不会被修改。退出码：0 表示没有重叠（或 `-moveout` 成功），1 表示发现重叠，2 表示文件无法读取、格式错误或写入失败。
 
+要找出无法进行 TNT 与村民实验的采样中心，可以运行支撑检查工具。它从同目录的 `samples/`（或 `--samples DIR`）读取每个条目的样本文件，同样只需要 Python 3：
+
+```bash
+python3 tools/check_tnt_support.py /path/to/paper-server/plugins/TerrainLab/samplingseed.yml
+python3 tools/check_tnt_support.py /path/to/samplingseed.yml --json
+python3 tools/check_tnt_support.py /path/to/samplingseed.yml -moveout
+```
+
+只检查 25 × 25 × 11 的核心区域。任一检查不通过，样本就会被标记：
+
+- **TNT：** 放在中心的 TNT 会穿过草、花、一层雪、藤蔓等没有碰撞箱的方块向下落。落入水、岩浆或其他液体，或一直到核心底部都没有可停留的方块，则不通过。
+- **村民：** 需要在距中心水平 1–8 格（欧氏距离，可用 `--radius` 修改）的某一列中，有一个位于 dy −5 到 +3 的站立方块，且其上方两格空闲，这样村民整体都在核心区域内。站立方块必须有碰撞箱，且不是液体、岩浆块、仙人掌、营火、栅栏或墙；上方两格不能有碰撞箱、液体或危险方块。
+
+碰撞判断来自脚本中的方块名表，而非 Minecraft 的实际形状；表中未知的方块名一律视为实心。`-moveout` 把被标记的条目移到同目录的 `samplingseed_unsupported_terrain.yml`，该文件已存在时追加写入。样本文件缺失或与条目不一致的条目会被报告并保留。与重叠检查一样，插件下次重写 `samplingseed.yml` 时被移出的条目会重新出现。退出码：0 表示没有被标记的条目（或 `-moveout` 成功）且所有条目都已检查，1 表示仍有被标记的条目留在文件中或有条目无法检查，2 表示文件无法读取、格式错误或写入失败。
+
 ## 3. 位置筛选实际保证什么
 
 默认筛选条件是：中心附近 **3×3 的水平范围、向上 2 格全部为空气**，中心正下方一格不是空气。整块 25×25 区域不需要全部开阔，所以周围的坡地、树木、岩壁、水面和洞穴仍会保留下来。
@@ -457,6 +472,8 @@ context 的 X/Z 可配置为 25～59 的奇数，Y 可配置为 11～63 的奇�
 | `Gallery.java` | 游戏内单样本和分页展示、沙盒游玩模式 |
 | `tools/inspect_terrain.py` | 无 Minecraft 依赖的样本检查 |
 | `tools/check_sample_overlap.py` | 找出 `samplingseed.yml` 中核心区域重叠的采样中心 |
+| `tools/check_tnt_support.py` | 找出无法放置 TNT 或 1–8 格内没有村民站位的采样中心 |
+| `tools/test_tnt_support.py` | TNT/村民支撑检查工具的自测，只需 Python |
 | `tools/test_snapshot_io.py` | Java/Python 格式与文件行为自测 |
 | `tools/test_owned_metadata.py` | Paper 世界身份元数据 NBT 解析与拒绝逻辑自测 |
 | `pom.xml` | Java、Paper API 和 Gson 构建依赖 |

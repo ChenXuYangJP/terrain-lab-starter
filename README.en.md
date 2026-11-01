@@ -151,6 +151,21 @@ python3 tools/check_sample_overlap.py /path/to/samplingseed.yml -moveout
 
 Two samples overlap when they share a world seed and a dimension and their 25 × 25 × 11 core boxes share at least one block. The default mode lists every overlapping pair with the line numbers; `--json` prints the same pairs as JSON. `-moveout` keeps the first sample of each pair (in file order) and moves the others into `samplingseed_overlaped.yml` next to it, appending if that file exists. Because the plugin rewrites `samplingseed.yml` at server start and after every saved sample, the moved entries come back afterwards; sample files and job checkpoints are never touched. Exit status: 0 no overlaps (or `-moveout` succeeded), 1 overlaps found, 2 unreadable or malformed file or failed write.
 
+To find centers that cannot host a TNT and villager test, run the support checker. It reads each entry's sample file from `samples/` next to the file (or `--samples DIR`) and also needs only Python 3:
+
+```bash
+python3 tools/check_tnt_support.py /path/to/paper-server/plugins/TerrainLab/samplingseed.yml
+python3 tools/check_tnt_support.py /path/to/samplingseed.yml --json
+python3 tools/check_tnt_support.py /path/to/samplingseed.yml -moveout
+```
+
+Only the 25 × 25 × 11 core is inspected. A sample is flagged when either check fails:
+
+- **TNT:** a TNT at the center falls through blocks without collision, such as grass, flowers, a single snow layer or vines. The check fails if the TNT lands in water, lava or another liquid, or finds nothing to rest on down to the bottom of the core.
+- **Villager:** a villager needs a column 1–8 blocks from the center (horizontal Euclidean distance; change it with `--radius`) with a standing block between dy −5 and +3 and two free cells above it. That keeps the villager inside the core. The standing block must have collision and must not be liquid, magma, cactus, a campfire, a fence or a wall. The two free cells must have no collision, liquid or hazard.
+
+Collision comes from a name table in the script, not from Minecraft's shapes; block names it does not know are treated as solid. `-moveout` moves the flagged entries into `samplingseed_unsupported_terrain.yml` next to it, appending if that file exists. Entries whose sample file is missing or does not match are reported and kept. As with the overlap checker, the plugin's next rewrite of `samplingseed.yml` brings moved entries back. Exit status: 0 nothing flagged (or `-moveout` succeeded) and every entry checked, 1 flagged entries left in place or entries that could not be checked, 2 unreadable or malformed file or failed write.
+
 ## 3. What site filtering actually guarantees
 
 By default, the filter requires that **a 3×3 horizontal area around the center, 2 blocks high, is entirely air**, and that the block directly below the center is not air. The whole 25×25 region does not need to be open, so surrounding slopes, trees, cliffs, water surfaces and caves are kept.
@@ -457,6 +472,8 @@ Open the whole `terrain-lab-starter` folder in VS Code and edit the `.java` file
 | `Gallery.java` | In-game single-sample and paged display, sandbox play mode |
 | `tools/inspect_terrain.py` | Sample inspection with no Minecraft dependency |
 | `tools/check_sample_overlap.py` | Finds sampling centers in `samplingseed.yml` whose core boxes overlap |
+| `tools/check_tnt_support.py` | Finds sampling centers that cannot hold a TNT or have no villager spot 1–8 blocks away |
+| `tools/test_tnt_support.py` | Self-tests for the TNT/villager support checker, Python only |
 | `tools/test_snapshot_io.py` | Java/Python format and file behavior self-tests |
 | `tools/test_owned_metadata.py` | Self-tests for parsing and rejecting Paper world identity metadata NBT |
 | `pom.xml` | Java, Paper API and Gson build dependencies |

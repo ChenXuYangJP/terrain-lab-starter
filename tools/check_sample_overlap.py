@@ -236,10 +236,11 @@ def write_atomic(path: Path, text: str) -> None:
         raise
 
 
-def move_out(path: Path, centers: CenterFile, pairs: list[tuple[Entry, Entry]]) -> dict[str, Any]:
-    target = path.with_name(OVERLAP_FILE)
-    require(target.resolve() != path.resolve(), f"{path} is already the overlap file")
-    kept, moved = split_overlaps(centers.groups, pairs)
+def move_entries(path: Path, centers: CenterFile, kept: dict[str, list[Entry]],
+                 moved: dict[str, list[Entry]], target_name: str, header: str) -> dict[str, Any]:
+    """Appends moved entries to target_name next to path, skipping known samples, then rewrites path."""
+    target = path.with_name(target_name)
+    require(target.resolve() != path.resolve(), f"{path} is already {target_name}")
     merged = read_centers(target).groups if target.exists() else {}
     known = {entry.sample for entries in merged.values() for entry in entries}
     added = 0
@@ -251,11 +252,17 @@ def move_out(path: Path, centers: CenterFile, pairs: list[tuple[Entry, Entry]]) 
                 added += 1
     info = path.stat()
     require((info.st_mtime_ns, info.st_size) == centers.stamp, f"{path} changed while it was checked; run again")
-    # The overlap file goes first, so an interrupted run never drops an entry from both files.
-    write_atomic(target, render(OVERLAP_HEADER, merged))
+    # The target file goes first, so an interrupted run never drops an entry from both files.
+    write_atomic(target, render(header, merged))
     write_atomic(path, render(centers.header, kept))
-    return {"overlap_file": str(target), "moved": sum(map(len, moved.values())), "added": added,
+    return {"target_file": str(target), "moved": sum(map(len, moved.values())), "added": added,
             "kept": sum(map(len, kept.values()))}
+
+
+def move_out(path: Path, centers: CenterFile, pairs: list[tuple[Entry, Entry]]) -> dict[str, Any]:
+    kept, moved = split_overlaps(centers.groups, pairs)
+    result = move_entries(path, centers, kept, moved, OVERLAP_FILE, OVERLAP_HEADER)
+    return {"overlap_file": result.pop("target_file"), **result}
 
 
 def odd_size(text: str) -> int:
