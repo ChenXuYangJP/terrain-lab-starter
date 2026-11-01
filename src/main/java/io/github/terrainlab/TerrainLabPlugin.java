@@ -20,13 +20,16 @@ import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -35,10 +38,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -68,6 +73,17 @@ public final class TerrainLabPlugin extends JavaPlugin {
     private long epoch;
     private String phase = "idle";
     private CommandSender observer;
+    // Samples of every job checkpoint, by job id. Written on the io thread; -continue reads a
+    // snapshot on the main thread, so every access holds its monitor.
+    private final Map<String, List<JobState.SampleRef>> samplingIndex = new TreeMap<>();
+    private volatile boolean samplingIndexReady;
+    private static final String CLEAR_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    private static final long CLEAR_CODE_MILLIS = 60_000L;
+    private static final Pattern SAMPLE_TEMP = Pattern.compile("\\.sample_[a-z0-9_]{1,100}-[0-9]+\\.tmp");
+    private static final Pattern JOB_FILE = Pattern.compile("job_[a-z0-9_]{1,80}(\\.json\\.gz|-report\\.csv)");
+    // Pending /terrain clearsamples confirmations by sender; main thread only.
+    private final Map<String, PendingClear> pendingClears = new HashMap<>();
+    private final SecureRandom secureRandom = new SecureRandom();
 
     @Override public void onEnable() {
         try {
@@ -77,6 +93,8 @@ public final class TerrainLabPlugin extends JavaPlugin {
             io = Executors.newSingleThreadExecutor(r -> {
                 Thread t = new Thread(r, "TerrainLab-file-io"); t.setDaemon(true); return t;
             });
+            if (!Files.exists(getDataFolder().toPath().resolve(SeedFiles.WORLD_SEEDS))) saveResource(SeedFiles.WORLD_SEEDS, false);
+            io.execute(this::rebuildSamplingIndex);
             worlds = new OwnedWorlds(this);
             gallery = new Gallery(this, snapshots);
             Objects.requireNonNull(getCommand("terrain")).setExecutor(this);
@@ -129,6 +147,7 @@ public final class TerrainLabPlugin extends JavaPlugin {
             switch (action) {
                 case "catalog" -> catalog(sender);
                 case "start" -> start(sender, args);
+                case "startyml" -> startFromFile(sender, args);
                 case "pause", "stop" -> {
                     pauseRequested = true; running = false; getServer().allowPausing(this, !busy); checkpoint();
                     sender.sendMessage("TerrainLab: paused. An in-flight sample finishes saving; use /terrain resume.");
@@ -136,6 +155,7 @@ public final class TerrainLabPlugin extends JavaPlugin {
                 case "resume" -> resume(sender, args);
                 case "status" -> status(sender);
                 case "list" -> list(sender, args);
+                case "clearsamples" -> clearSamples(sender, args);
                 case "show", "gallery", "goto", "play", "tnt", "villagerai", "villagerhp", "reset", "leave" -> {
                     if (!(sender instanceof Player player)) throw new IllegalArgumentException("Preview commands must be used in-game.");
                     gallery.command(player, args);
@@ -150,7 +170,10 @@ public final class TerrainLabPlugin extends JavaPlugin {
 
     private void help(CommandSender s) {
         s.sendMessage("/terrain catalog | status | pause | resume [job_id] | list [page]");
-        s.sendMessage("/terrain start <seed1,seed2,...> <per-biome> [all|overworld|nether|end] [biome_key]");
+        s.sendMessage("/terrain clearsamples [confirm <code>|cancel]  (permanently deletes all samples and job records)");
+        s.sendMessage("/terrain start <seed1,seed2,...> <per-biome> [all|overworld|nether|end] [biome_key] [-continue]");
+        s.sendMessage("/terrain startyml <per-biome> [all|overworld|nether|end] [biome_key] [-continue]  (seeds from worldseeds.yml)");
+        s.sendMessage("-continue: avoid earlier centres of these seeds and top each seed+biome up to <per-biome> in total");
         s.sendMessage("/terrain show <sample_id> [core|context] | gallery <page> [core|context] | goto <1..9> | leave");
         s.sendMessage("/terrain play [slot] | tnt [slot] [fuse_ticks] | villagerai [on|off] | villagerhp [on|off] | reset  (sandbox; never saved to samples)");
         s.sendMessage("Quick check: /terrain start 101 1 overworld minecraft:plains");
@@ -175,21 +198,65 @@ public final class TerrainLabPlugin extends JavaPlugin {
 
     private void start(CommandSender sender, String[] args) throws IOException {
         if (busy || running) throw new IllegalArgumentException("Collection is busy. /terrain pause and wait before starting a new job.");
-        if (args.length < 3 || args.length > 5) throw new IllegalArgumentException("Usage: /terrain start <seeds> <per-biome> [dimension] [biome]");
+        String[] positional = withoutContinueFlag(args);
+        if (positional.length < 3 || positional.length > 5) {
+            throw new IllegalArgumentException("Usage: /terrain start <seeds> <per-biome> [dimension] [biome] [-continue]");
+        }
         LinkedHashSet<Long> seeds = new LinkedHashSet<>();
-        for (String raw : args[1].split(",")) seeds.add(Long.parseLong(raw));
+        for (String raw : positional[1].split(",")) seeds.add(Long.parseLong(raw));
+        startJob(sender, seeds, Arrays.copyOfRange(positional, 2, positional.length), "the command line", positional.length != args.length);
+    }
+
+    private void startFromFile(CommandSender sender, String[] args) throws IOException {
+        if (busy || running) throw new IllegalArgumentException("Collection is busy. /terrain pause and wait before starting a new job.");
+        String[] positional = withoutContinueFlag(args);
+        if (positional.length < 2 || positional.length > 4) {
+            throw new IllegalArgumentException("Usage: /terrain startyml <per-biome> [dimension] [biome] [-continue]");
+        }
+        Path file = getDataFolder().toPath().resolve(SeedFiles.WORLD_SEEDS);
+        if (!Files.isRegularFile(file)) {
+            saveResource(SeedFiles.WORLD_SEEDS, false);
+            throw new IllegalArgumentException("Created plugins/TerrainLab/" + SeedFiles.WORLD_SEEDS + "; uncomment and edit its seeds list, then retry.");
+        }
+        startJob(sender, SeedFiles.readWorldSeeds(file), Arrays.copyOfRange(positional, 1, positional.length),
+                SeedFiles.WORLD_SEEDS, positional.length != args.length);
+    }
+
+    private static String[] withoutContinueFlag(String[] args) {
+        return Arrays.stream(args).filter(arg -> !arg.equalsIgnoreCase("-continue")).toArray(String[]::new);
+    }
+
+    /** Earlier samples for these seeds: every indexed job plus the loaded job, whose index update may still be queued. */
+    private List<JobState.SampleRef> earlierSamples(Set<String> seeds) {
+        List<JobState.SampleRef> earlier = new ArrayList<>();
+        Set<String> ids = new java.util.HashSet<>();
+        synchronized (samplingIndex) {
+            for (List<JobState.SampleRef> samples : samplingIndex.values()) {
+                for (JobState.SampleRef s : samples) if (seeds.contains(s.seed()) && ids.add(s.id())) earlier.add(s);
+            }
+        }
+        if (job != null) for (JobState.SampleRef s : job.samples) if (seeds.contains(s.seed()) && ids.add(s.id())) earlier.add(s);
+        return earlier;
+    }
+
+    /**
+     * rest is {per-biome, [dimension], [biome]}; seedSource only labels the start message. With continuation,
+     * earlier centres for these seeds are avoided and each bucket is topped up to per-biome in total.
+     */
+    private void startJob(CommandSender sender, LinkedHashSet<Long> seeds, String[] rest, String seedSource,
+                          boolean continuation) throws IOException {
         if (seeds.isEmpty() || seeds.size() > 20) throw new IllegalArgumentException("Provide 1..20 distinct signed 64-bit seeds.");
-        int quota = Integer.parseInt(args[2]);
+        int quota = Integer.parseInt(rest[0]);
         if (quota < 1 || quota > 100) throw new IllegalArgumentException("per-biome must be 1..100.");
-        List<String> dimensions = args.length >= 4 && !args[3].equalsIgnoreCase("all")
-                ? List.of(args[3].toLowerCase(java.util.Locale.ROOT)) : getConfig().getStringList("collection.dimensions");
+        List<String> dimensions = rest.length >= 2 && !rest[1].equalsIgnoreCase("all")
+                ? List.of(rest[1].toLowerCase(java.util.Locale.ROOT)) : getConfig().getStringList("collection.dimensions");
         List<BiomeCatalog.Target> targets = BiomeCatalog.targets(dimensions, getConfig().getStringList("collection.excluded-biomes"));
-        if (args.length == 5) {
-            String wanted = BiomeCatalog.key(BiomeCatalog.resolve(args[4]));
+        if (rest.length == 3) {
+            String wanted = BiomeCatalog.key(BiomeCatalog.resolve(rest[2]));
             targets = targets.stream().filter(t -> t.biome().equals(wanted)).toList();
         }
         if (targets.isEmpty()) throw new IllegalArgumentException("No target biomes match the chosen dimension/tag/filter.");
-        releaseSource();
+        if (continuation && !samplingIndexReady) throw new IllegalArgumentException("Still indexing earlier jobs for -continue; retry in a few seconds.");
         JobState created = new JobState();
         created.id = "job_" + Long.toString(System.currentTimeMillis(), 36) + "_" + UUID.randomUUID().toString().substring(0, 8);
         created.createdAt = Instant.now().toString();
@@ -202,12 +269,31 @@ public final class TerrainLabPlugin extends JavaPlugin {
             JobState.Bucket b = new JobState.Bucket();
             b.seed = Long.toString(seed); b.dimension = target.dimension(); b.biome = target.biome(); created.buckets.add(b);
         }
+        if (continuation) {
+            created.continuation = true;
+            created.avoid = earlierSamples(new java.util.HashSet<>(seeds.stream().map(String::valueOf).toList()));
+            // A fresh search order; salt 0 would retrace the earlier jobs' candidates step by step.
+            do { created.samplingSalt = secureRandom.nextLong(); } while (created.samplingSalt == 0);
+            for (JobState.Bucket b : created.buckets) {
+                b.quota = Math.max(0, quota - JobState.existing(created.avoid, b.seed, b.dimension, b.biome));
+            }
+            if (created.target() == 0) {
+                throw new IllegalArgumentException("Every seed+biome already has " + quota + " or more samples; nothing to collect.");
+            }
+        }
         created.validate();
+        releaseSource();
         job = created; observer = sender; epoch++; running = true; pauseRequested = false; nextStepTick = tick + 1;
         getServer().allowPausing(this, false);
         checkpoint();
         sender.sendMessage("TerrainLab: started " + job.id + ", target " + job.target() + " (" + seeds.size()
-                + " seeds x " + targets.size() + " biome tags x " + quota + "). Shortfalls are reported.");
+                + " seeds x " + targets.size() + " biome tags x " + (continuation ? "top-up to " : "") + quota + "). Shortfalls are reported.");
+        if (continuation) {
+            long full = job.buckets.stream().filter(b -> job.quota(b) == 0).count();
+            sender.sendMessage("Continuing: avoiding " + job.avoid.size() + " earlier centre(s) for these seeds; " + full + " of "
+                    + job.buckets.size() + " seed+biome bucket(s) already have " + quota + "; collecting " + job.target() + " more.");
+        }
+        sender.sendMessage("Seeds from " + seedSource + ": " + String.join(", ", seeds.stream().map(String::valueOf).toList()));
         sender.sendMessage("Source worlds/chunks are generated on disk. Large jobs can take substantial time and storage.");
     }
 
@@ -222,11 +308,7 @@ public final class TerrainLabPlugin extends JavaPlugin {
             try {
                 String id = explicit != null ? explicit : Files.readString(getDataFolder().toPath().resolve("latest-job.txt")).trim();
                 if (!id.matches("job_[a-z0-9_]{1,80}")) throw new IllegalArgumentException("Invalid job id.");
-                JobState loaded;
-                try (var reader = new InputStreamReader(new GZIPInputStream(Files.newInputStream(jobPath(id))), StandardCharsets.UTF_8)) {
-                    loaded = gson.fromJson(reader, JobState.class);
-                }
-                loaded.validate();
+                JobState loaded = readJob(jobPath(id));
                 TerrainSnapshot pending = null;
                 if (loaded.pendingSampleId != null && Files.isRegularFile(snapshots.root().resolve(loaded.pendingSampleId + ".json.gz"))) {
                     pending = snapshots.load(loaded.pendingSampleId);
@@ -269,7 +351,7 @@ public final class TerrainLabPlugin extends JavaPlugin {
         if (job.bucketIndex < job.buckets.size()) {
             JobState.Bucket b = job.buckets.get(job.bucketIndex);
             sender.sendMessage("seed=" + b.seed + " " + b.dimension + "/" + b.biome + ": " + b.sampleIds.size()
-                    + "/" + job.perBiome + "; candidates=" + b.attempts + "; locates=" + b.locates + "; rejected=" + b.rejected);
+                    + "/" + job.quota(b) + "; candidates=" + b.attempts + "; locates=" + b.locates + "; rejected=" + b.rejected);
         }
         if (job.lastError != null) sender.sendMessage("Last error: " + job.lastError);
         sender.sendMessage("Snapshots: plugins/TerrainLab/samples ; per-biome report: jobs/" + job.id + "-report.csv");
@@ -287,6 +369,107 @@ public final class TerrainLabPlugin extends JavaPlugin {
         });
     }
 
+    /** Step 1 issues a per-sender code; step 2 must repeat it within 60 s. Any mismatch cancels. */
+    private void clearSamples(CommandSender sender, String[] args) {
+        String key = sender instanceof Player player ? player.getUniqueId().toString() : sender.getName();
+        if (args.length == 1) {
+            requireIdleForClear();
+            StringBuilder code = new StringBuilder();
+            for (int i = 0; i < 6; i++) code.append(CLEAR_CODE_ALPHABET.charAt(secureRandom.nextInt(CLEAR_CODE_ALPHABET.length())));
+            pendingClears.put(key, new PendingClear(code.toString(), System.currentTimeMillis() + CLEAR_CODE_MILLIS));
+            io.execute(() -> {
+                try {
+                    ClearTargets targets = clearTargets();
+                    onMain(() -> {
+                        sender.sendMessage("TerrainLab: this PERMANENTLY deletes " + targets.samples().size() + " sample file(s) and "
+                                + targets.jobs().size() + " job file(s) (checkpoints, reports, latest-job.txt), and empties "
+                                + SeedFiles.SAMPLING_SEEDS + ". " + SeedFiles.WORLD_SEEDS + ", config and worlds are kept.");
+                        sender.sendMessage("Type /terrain clearsamples confirm " + code + " within 60 seconds, or /terrain clearsamples cancel.");
+                    });
+                } catch (IOException error) { onMain(() -> sender.sendMessage("TerrainLab: could not list files to clear: " + error.getMessage())); }
+            });
+            return;
+        }
+        String action = args[1].toLowerCase(java.util.Locale.ROOT);
+        if (action.equals("cancel") && args.length == 2) {
+            sender.sendMessage(pendingClears.remove(key) != null ? "TerrainLab: clear cancelled." : "TerrainLab: no pending clear.");
+            return;
+        }
+        if (!action.equals("confirm") || args.length != 3) throw new IllegalArgumentException("Usage: /terrain clearsamples [confirm <code>|cancel]");
+        PendingClear pending = pendingClears.remove(key);
+        if (pending == null) throw new IllegalArgumentException("No pending clear; run /terrain clearsamples first.");
+        if (System.currentTimeMillis() > pending.expiresAtMillis()) throw new IllegalArgumentException("Confirmation code expired; run /terrain clearsamples again.");
+        if (!pending.code().equals(args[2].toUpperCase(java.util.Locale.ROOT))) {
+            throw new IllegalArgumentException("Confirmation code does not match; request cancelled. Run /terrain clearsamples again.");
+        }
+        requireIdleForClear();
+        // Drop the loaded job first, so no later checkpoint can recreate its file.
+        job = null; observer = null; phase = "idle"; epoch++;
+        releaseSource();
+        gallery.forgetShownSamples();
+        sender.sendMessage("TerrainLab: deleting all samples and job records...");
+        io.execute(() -> deleteClearTargets(sender));
+    }
+
+    private void requireIdleForClear() {
+        if (busy || running) throw new IllegalArgumentException("Collection is busy. /terrain pause and wait before clearing samples.");
+    }
+
+    /** io thread: only files carrying this plugin's own names are ever selected. */
+    private ClearTargets clearTargets() throws IOException {
+        List<Path> samples = new ArrayList<>();
+        try (var files = Files.newDirectoryStream(snapshots.root())) {
+            for (Path file : files) {
+                String name = file.getFileName().toString();
+                boolean published = name.endsWith(".json.gz")
+                        && TerrainSnapshot.ID_PATTERN.matcher(name.substring(0, name.length() - ".json.gz".length())).matches();
+                if ((published || SAMPLE_TEMP.matcher(name).matches()) && Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) samples.add(file);
+            }
+        }
+        List<Path> jobs = new ArrayList<>();
+        Path jobsDir = getDataFolder().toPath().resolve("jobs");
+        if (Files.isDirectory(jobsDir)) {
+            try (var files = Files.newDirectoryStream(jobsDir)) {
+                for (Path file : files) {
+                    if (JOB_FILE.matcher(file.getFileName().toString()).matches() && Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) jobs.add(file);
+                }
+            }
+        }
+        Path latest = getDataFolder().toPath().resolve("latest-job.txt");
+        if (Files.isRegularFile(latest, LinkOption.NOFOLLOW_LINKS)) jobs.add(latest);
+        return new ClearTargets(samples, jobs);
+    }
+
+    /** io thread; queued after any earlier checkpoint writes, so none can land afterwards. */
+    private void deleteClearTargets(CommandSender sender) {
+        List<String> errors = new ArrayList<>();
+        int samples = 0, jobs = 0;
+        try {
+            ClearTargets targets = clearTargets();
+            samples = deleteFiles(targets.samples(), errors);
+            jobs = deleteFiles(targets.jobs(), errors);
+        } catch (IOException error) { errors.add(error.getMessage()); }
+        synchronized (samplingIndex) { samplingIndex.clear(); }
+        boolean indexWritten = true;
+        try { writeSamplingCenters(); }
+        catch (IOException error) { indexWritten = false; errors.add(SeedFiles.SAMPLING_SEEDS + ": " + error.getMessage()); }
+        String summary = "Deleted " + samples + " sample file(s) and " + jobs + " job file(s)"
+                + (indexWritten ? "; " + SeedFiles.SAMPLING_SEEDS + " is now empty." : ".")
+                + (errors.isEmpty() ? "" : " " + errors.size() + " problem(s); first: " + errors.get(0));
+        if (errors.isEmpty()) getLogger().info("Samples cleared by " + sender.getName() + ". " + summary);
+        else getLogger().warning("Samples cleared by " + sender.getName() + " with problems. " + summary);
+        onMain(() -> sender.sendMessage("TerrainLab: " + summary));
+    }
+
+    private static int deleteFiles(List<Path> files, List<String> errors) {
+        int deleted = 0;
+        for (Path file : files) {
+            try { if (Files.deleteIfExists(file)) deleted++; }
+            catch (IOException error) { errors.add(file.getFileName() + ": " + error.getMessage()); }
+        }
+        return deleted;
+    }
+
     private void tick() {
         tick++;
         try {
@@ -298,7 +481,7 @@ public final class TerrainLabPlugin extends JavaPlugin {
             if (!running || busy || tick < nextStepTick || job == null) return;
             while (job.bucketIndex < job.buckets.size()) {
                 JobState.Bucket b = currentBucket();
-                if (b.sampleIds.size() >= job.perBiome || b.exhausted) { job.bucketIndex++; continue; }
+                if (b.sampleIds.size() >= job.quota(b) || b.exhausted) { job.bucketIndex++; continue; }
                 if (b.attempts >= job.settings.maxAttempts()
                         || ((b.anchorX == null || b.candidatesAtAnchor >= job.settings.candidatesPerLocate()) && b.locates >= job.settings.maxLocates())) {
                     b.exhausted = true; checkpoint(); job.bucketIndex++; continue;
@@ -358,16 +541,25 @@ public final class TerrainLabPlugin extends JavaPlugin {
             SiteFinder.Site site = SiteFinder.find(sourceWorld, b.biome, x, z, b.anchorY,
                     s.sizeY() / 2, s.clearanceRadius(), s.clearanceHeight(), s.solidSupport(), randomFor(b, b.attempts, 0x82F1L).nextLong());
             if (site == null) { rejectCandidate(b, "no_matching_clear_air_center"); return; }
-            for (JobState.SampleRef prior : job.samples) {
-                if (!prior.seed().equals(b.seed) || !prior.dimension().equals(b.dimension)) continue;
-                long dx = (long) x - prior.x(), dz = (long) z - prior.z();
-                boolean close = dx * dx + dz * dz < (long) s.minimumDistance() * s.minimumDistance();
-                boolean overlap = Math.abs(dx) < s.sizeX() && Math.abs((long) site.y() - prior.y()) < s.sizeY() && Math.abs(dz) < s.sizeZ();
-                if (close || overlap) { rejectCandidate(b, "near_or_overlapping_prior_sample"); return; }
+            if (clashes(job.samples, b, x, site.y(), z, s)) { rejectCandidate(b, "near_or_overlapping_prior_sample"); return; }
+            if (job.avoid != null && clashes(job.avoid, b, x, site.y(), z, s)) {
+                rejectCandidate(b, "near_or_overlapping_earlier_job_sample"); return;
             }
             phase = "reading block/biome data";
             capture = new Capture(b, site, sourceWorld);
         } catch (Exception error) { releaseChunks(); busy = false; fail("Candidate processing failed", error); }
+    }
+
+    /** Same seed and dimension, any biome: too close to, or overlapping the context box of, a prior centre. */
+    private static boolean clashes(List<JobState.SampleRef> priors, JobState.Bucket b, int x, int y, int z, CollectionSettings s) {
+        for (JobState.SampleRef prior : priors) {
+            if (!prior.seed().equals(b.seed) || !prior.dimension().equals(b.dimension)) continue;
+            long dx = (long) x - prior.x(), dz = (long) z - prior.z();
+            boolean close = dx * dx + dz * dz < (long) s.minimumDistance() * s.minimumDistance();
+            boolean overlap = Math.abs(dx) < s.sizeX() && Math.abs((long) y - prior.y()) < s.sizeY() && Math.abs(dz) < s.sizeZ();
+            if (close || overlap) return true;
+        }
+        return false;
     }
 
     private void rejectCandidate(JobState.Bucket b, String reason) {
@@ -376,8 +568,9 @@ public final class TerrainLabPlugin extends JavaPlugin {
     }
 
     private Random randomFor(JobState.Bucket b, int index, long salt) {
+        // samplingSalt is 0 except for -continue jobs, which must not retrace earlier jobs' candidates.
         long mixed = Long.parseLong(b.seed) ^ ((long) b.biome.hashCode() << 32) ^ b.dimension.hashCode()
-                ^ salt ^ (0x9E3779B97F4A7C15L * (index + 1L));
+                ^ salt ^ job.samplingSalt ^ (0x9E3779B97F4A7C15L * (index + 1L));
         return new Random(mixed);
     }
     private void coolDown() {
@@ -392,6 +585,44 @@ public final class TerrainLabPlugin extends JavaPlugin {
     private void accept(JobState.Bucket b, String id, int x, int y, int z) {
         if (!b.sampleIds.contains(id)) b.sampleIds.add(id);
         if (job.samples.stream().noneMatch(s -> s.id().equals(id))) job.samples.add(new JobState.SampleRef(id, b.seed, b.dimension, b.biome, x, y, z));
+        recordSamplingCenters();
+    }
+
+    private void recordSamplingCenters() {
+        if (io == null || io.isShutdown()) return;
+        String id = job.id;
+        List<JobState.SampleRef> samples = List.copyOf(job.samples);
+        io.execute(() -> {
+            synchronized (samplingIndex) { samplingIndex.put(id, samples); }
+            try { writeSamplingCenters(); }
+            catch (IOException error) { getLogger().warning(SeedFiles.SAMPLING_SEEDS + " not updated: " + error.getMessage()); }
+        });
+    }
+
+    /** io thread: index every job checkpoint, then write samplingseed.yml (also when there are none). */
+    private void rebuildSamplingIndex() {
+        try (var files = Files.newDirectoryStream(getDataFolder().toPath().resolve("jobs"), "job_*.json.gz")) {
+            for (Path file : files) {
+                try {
+                    JobState state = readJob(file);
+                    synchronized (samplingIndex) { samplingIndex.put(state.id, List.copyOf(state.samples)); }
+                } catch (Exception error) {
+                    getLogger().warning(SeedFiles.SAMPLING_SEEDS + " skipped unreadable " + file.getFileName() + ": " + error.getMessage());
+                }
+            }
+            writeSamplingCenters();
+        } catch (IOException error) {
+            getLogger().warning(SeedFiles.SAMPLING_SEEDS + " not rebuilt: " + error.getMessage());
+        } finally {
+            // Unreadable job files are already logged; they must not block -continue forever.
+            samplingIndexReady = true;
+        }
+    }
+
+    private void writeSamplingCenters() throws IOException {
+        String text;
+        synchronized (samplingIndex) { text = SeedFiles.renderSamplingCenters(samplingIndex); }
+        atomicText(getDataFolder().toPath().resolve(SeedFiles.SAMPLING_SEEDS), text);
     }
 
     private void fail(String prefix, Exception error) {
@@ -562,7 +793,18 @@ public final class TerrainLabPlugin extends JavaPlugin {
     }
 
     private Path jobPath(String id) { return getDataFolder().toPath().resolve("jobs").resolve(id + ".json.gz"); }
+    private JobState readJob(Path file) throws IOException {
+        JobState loaded;
+        try (var reader = new InputStreamReader(new GZIPInputStream(Files.newInputStream(file)), StandardCharsets.UTF_8)) {
+            loaded = gson.fromJson(reader, JobState.class);
+        }
+        if (loaded == null) throw new IllegalArgumentException("Empty job file.");
+        loaded.validate();
+        return loaded;
+    }
     private record Checkpoint(String id, String json, String report) {}
+    private record PendingClear(String code, long expiresAtMillis) {}
+    private record ClearTargets(List<Path> samples, List<Path> jobs) {}
     private Checkpoint checkpointData() { return new Checkpoint(job.id, gson.toJson(job), reportCsv(job)); }
     private void writeCheckpoint(Checkpoint checkpoint) throws IOException {
         atomicGzip(jobPath(checkpoint.id()), checkpoint.json());
@@ -590,9 +832,9 @@ public final class TerrainLabPlugin extends JavaPlugin {
     private String reportCsv(JobState state) {
         StringBuilder out = new StringBuilder("seed,dimension,biome,target,accepted,shortfall,candidates,locates,finished,rejections\n");
         for (JobState.Bucket b : state.buckets) out.append(csv(b.seed)).append(',').append(csv(b.dimension)).append(',')
-                .append(csv(b.biome)).append(',').append(state.perBiome).append(',').append(b.sampleIds.size()).append(',')
-                .append(state.perBiome - b.sampleIds.size()).append(',').append(b.attempts).append(',').append(b.locates).append(',')
-                .append(b.exhausted || b.sampleIds.size() >= state.perBiome).append(',').append(csv(gson.toJson(b.rejected))).append('\n');
+                .append(csv(b.biome)).append(',').append(state.quota(b)).append(',').append(b.sampleIds.size()).append(',')
+                .append(state.quota(b) - b.sampleIds.size()).append(',').append(b.attempts).append(',').append(b.locates).append(',')
+                .append(b.exhausted || b.sampleIds.size() >= state.quota(b)).append(',').append(csv(gson.toJson(b.rejected))).append('\n');
         return out.toString();
     }
     private static String csv(String value) { return '"' + value.replace("\"", "\"\"").replace("\n", " ") + '"'; }

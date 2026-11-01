@@ -120,6 +120,11 @@ public final class Gallery implements Listener {
         ticker = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 1L, 1L);
     }
 
+    /** After /terrain clearsamples: reset has no sample files to reload; pasted blocks stay until the next render. */
+    public void forgetShownSamples() {
+        lastIds = null;
+    }
+
     /** Called on the server thread; the first argument is the subcommand. */
     public boolean command(Player player, String[] args) {
         if (args.length == 0) return false;

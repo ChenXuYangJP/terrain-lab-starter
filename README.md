@@ -19,7 +19,7 @@ TerrainLab 是一个独立的 **Paper 26.3 / Java 25** 插件，用于先建立�
 
 ### 使用提供的 JAR
 
-从 [GitHub Releases](https://github.com/ChenXuYangJP/terrain-lab-starter/releases/tag/v0.2.0) 下载预编译的 `terrain-lab-0.2.0.jar` 和 `SHA256SUMS.txt`，放在同一目录下可以先校验文件：
+从 [GitHub Releases](https://github.com/ChenXuYangJP/terrain-lab-starter/releases/tag/v0.3.0) 下载预编译的 `terrain-lab-0.3.0.jar` 和 `SHA256SUMS.txt`，放在同一目录下可以先校验文件：
 
 ```bash
 sha256sum -c SHA256SUMS.txt
@@ -28,12 +28,12 @@ sha256sum -c SHA256SUMS.txt
 在服务器控制台执行 `stop`，等待服务器正常退出，然后将 JAR 复制到服务器 `plugins` 目录：
 
 ```bash
-cp terrain-lab-0.2.0.jar /path/to/paper-server/plugins/
+cp terrain-lab-0.3.0.jar /path/to/paper-server/plugins/
 ```
 
 把示例路径改成自己的服务器目录，按原来的方式启动 Paper。首次启动会生成 `plugins/TerrainLab/config.yml`。服务端日志应出现 `TerrainLab ready`。
 
-从旧版本升级时，先删除 `plugins` 中旧的 `terrain-lab-0.1.0.jar`，再复制新 JAR，否则 Paper 会发现两个同名插件而拒绝重复加载。`plugins/TerrainLab/` 中的配置、样本和任务文件保持不变。
+从旧版本升级时，先删除 `plugins` 中旧的 JAR（例如 `terrain-lab-0.2.0.jar`），再复制新 JAR，否则 Paper 会发现两个同名插件而拒绝重复加载。`plugins/TerrainLab/` 中的配置、样本和任务文件保持不变，旧版本启动的任务仍可继续。
 
 这个 JAR 是服务端插件，放在 Paper 服务器的 `plugins` 目录，不需要放进客户端。普通 Minecraft 客户端可以连接和观看。
 
@@ -86,6 +86,70 @@ cp terrain-lab-0.2.0.jar /path/to/paper-server/plugins/
 seed 使用十进制有符号 64 位整数。最多接受 20 个不同 seed；每类配额为 1～100。省略维度时使用配置中的维度列表。输入多个 seed 时，逗号两侧不要加空格。
 
 每次 `start` 都创建一个新的 `job_id`，并使用该任务独立的来源世界。即使 seed 一样，新任务也不会接着旧任务计数。要继续旧任务，使用 `resume`。
+
+### 从 worldseeds.yml 读取 seed
+
+也可以把 seed 写在 `plugins/TerrainLab/worldseeds.yml` 中，再用 `startyml` 启动任务：
+
+```text
+/terrain startyml <每类数量> [all|overworld|nether|end] [biome_key]
+```
+
+首次启动插件时会生成这个文件，内容只有注释和一份被注释掉的示例。取消注释并修改 `seeds` 列表即可：
+
+```yaml
+seeds:
+  - "101"
+  - "202"
+  - "303"
+  - "404"
+  - "505"
+```
+
+此时 `/terrain startyml 10` 与 `/terrain start 101,202,303,404,505 10` 完全相同，可选的维度和 biome 参数也一样。seed 规则与 `start` 相同：十进制有符号 64 位整数，1～20 个，重复的会被忽略。建议给每个 seed 加引号：YAML 会把未加引号、以 0 开头的数字当作八进制，过大的数字也可能无法按整数读取。每次执行 `startyml` 都会重新读取该文件，不需要重启服务器。
+
+### 续采：-continue
+
+不加 `-continue` 时，新任务与旧任务完全独立：每类数量只计本任务，而且候选搜索只由世界 seed、biome 和维度决定，所以相同 seed 的新任务会重走旧任务的搜索路径，先采到与旧任务相同的位置。这是为了可复现而有意如此。
+
+在 `start` 或 `startyml` 末尾加上 `-continue`，新任务会接着已有样本采集：
+
+```text
+/terrain startyml 9 -continue
+/terrain start 101,202 9 overworld -continue
+```
+
+- **补足到 N。** 已有样本计入每类数量，每个 seed × 维度 × biome 只补足差额。例如 seed 101 的 plains 已有 1 个，`startyml 9 -continue` 再采 8 个，合计 9 个；已有 9 个或更多的组合直接跳过。上次因找不到合格位置而缺额的组合会在本次重试，并获得新的候选预算。重复位置只计一次。所有组合都已满足时，命令会拒绝启动。
+- **避开已有中心。** 已有样本就是 `samplingseed.yml` 中列出的那些（来自 `jobs/` 的任务记录）。新中心与这些 seed 下的已有中心之间使用与任务内相同的规则：同一维度内至少相距 48 格，上下文区域不能重叠，不区分 biome。因此被拒绝的候选在 report CSV 中记为 `near_or_overlapping_earlier_job_sample`。
+- **新的搜索顺序。** 续采任务使用新的随机盐，不会重走旧任务的路径；盐保存在任务文件中，`resume` 时行为一致。
+
+服务器刚启动时插件需要先读取全部任务记录，此时 `-continue` 会提示稍后重试。用 `clearsamples` 清除后不再有已有样本，`-continue` 相当于普通任务（但搜索顺序仍是新的）。
+
+### samplingseed.yml：采样中心记录
+
+插件维护 `plugins/TerrainLab/samplingseed.yml`，按世界 seed 分组列出每个已保存样本的中心坐标和地形类型：
+
+```yaml
+world_seeds:
+  "101":
+    - sample: "sample_a0535c4b703a358872cadc05"
+      job: "job_mhf2k3ab_1a2b3c4d"
+      dimension: "overworld"
+      biome: "minecraft:plains"
+      center: [1234, 72, -567]
+```
+
+`center` 是样本中心在该 seed、该维度中的方块坐标，与样本 metadata 的 `source_origin_xyz` 相同；`biome` 是该中心被接受时请求的 biome。文件来自 `jobs/` 中的任务 checkpoint，包括 `start` 和 `startyml` 启动的所有任务，在服务器启动时和每保存一个样本后整体重写，因此手动修改会被覆盖；删除样本文件不会删除这里的记录。在另一个世界中按坐标找回地形时，还需要相同的 Minecraft 版本、数据包和生成设置（见第 7 节）。
+
+要检查已保存的中心是否靠得太近，可以对这个文件运行重叠检查工具，只需要 Python 3：
+
+```bash
+python3 tools/check_sample_overlap.py /path/to/paper-server/plugins/TerrainLab/samplingseed.yml
+python3 tools/check_sample_overlap.py /path/to/samplingseed.yml --json
+python3 tools/check_sample_overlap.py /path/to/samplingseed.yml -moveout
+```
+
+两个样本属于同一世界 seed 和同一维度，且 25 × 25 × 11 的核心区域至少共有一个方块时，视为重叠。默认模式列出每一对重叠样本及其行号；`--json` 以 JSON 输出同样的结果。`-moveout` 保留每对中（按文件顺序）的第一个样本，把其余样本移到同目录的 `samplingseed_overlaped.yml`，该文件已存在时追加写入。由于插件在服务器启动时和每保存一个样本后都会重写 `samplingseed.yml`，被移出的条目之后会重新出现；样本文件和任务 checkpoint 不会被修改。退出码：0 表示没有重叠（或 `-moveout` 成功），1 表示发现重叠，2 表示文件无法读取、格式错误或写入失败。
 
 ## 3. 位置筛选实际保证什么
 
@@ -164,8 +228,22 @@ CSV 中包含 `seed, dimension, biome, target, accepted, shortfall, candidates, 
 | `plugins/TerrainLab/jobs/job_*-report.csv` | 各桶产量、缺额和拒绝计数 |
 | `plugins/TerrainLab/latest-job.txt` | 最近任务 ID |
 | `plugins/TerrainLab/gallery-state.yml` | 预览区域恢复信息 |
+| `plugins/TerrainLab/worldseeds.yml` | `startyml` 使用的世界 seed 列表（用户编辑） |
+| `plugins/TerrainLab/samplingseed.yml` | 按世界 seed 分组的采样中心坐标和地形类型（由任务 checkpoint 生成） |
 
 来源世界和预览世界还会占用 Minecraft 的世界存档空间。插件使用自己的世界 key、所有权标记和 UUID 校验管理这些世界；遇到不能确认归属的已有世界会拒绝接管。暂停、换页和结束任务不会自动删除来源存档。
+
+### 清除全部样本
+
+```text
+/terrain clearsamples
+/terrain clearsamples confirm <确认码>
+/terrain clearsamples cancel
+```
+
+第一步会列出将要删除的文件数量，并给出一个 6 位确认码，60 秒内有效，只能由同一位玩家（或控制台）使用。第二步必须输入这个确认码才会执行删除；确认码错误或过期都会取消本次请求，需要重新执行第一步。任务正在运行或忙碌时会拒绝清除，请先 `/terrain pause` 并等待。
+
+删除是**永久**的，范围是：`samples/` 中的全部样本（包括中断保存留下的临时文件）、`jobs/` 中的任务 checkpoint 和 report CSV，以及 `latest-job.txt`；`samplingseed.yml` 随后重写为空。之后 `/terrain resume` 没有可恢复的任务。`worldseeds.yml`、`config.yml`、`catalog.json` 和预览状态会保留。来源世界和预览世界的存档也不会删除；如需释放这部分磁盘空间，需要另行处理。预览中已经粘贴的方块会保留到下一次 `show` 或 `gallery`。
 
 ## 6. 核心区域和上下文区域
 
@@ -375,8 +453,10 @@ context 的 X/Z 可配置为 25～59 的奇数，Y 可配置为 11～63 的奇�
 | `OwnedWorlds.java` | 专用来源/预览世界与所有权核验 |
 | `TerrainSnapshot.java` | 纯数据模型、坐标索引与一致性验证 |
 | `SnapshotIO.java` | gzip JSON、原子发布、hash 与读取 |
+| `SeedFiles.java` | 读取 `worldseeds.yml`，生成 `samplingseed.yml` |
 | `Gallery.java` | 游戏内单样本和分页展示、沙盒游玩模式 |
 | `tools/inspect_terrain.py` | 无 Minecraft 依赖的样本检查 |
+| `tools/check_sample_overlap.py` | 找出 `samplingseed.yml` 中核心区域重叠的采样中心 |
 | `tools/test_snapshot_io.py` | Java/Python 格式与文件行为自测 |
 | `tools/test_owned_metadata.py` | Paper 世界身份元数据 NBT 解析与拒绝逻辑自测 |
 | `pom.xml` | Java、Paper API 和 Gson 构建依赖 |
@@ -391,13 +471,13 @@ mvn package
 新 JAR 位于：
 
 ```text
-target/terrain-lab-0.2.0.jar
+target/terrain-lab-0.3.0.jar
 ```
 
 修改代码后的安装操作应复制这个新的 `target` 文件；`dist` 中的预编译副本不会因你编辑源码而自动更新。
 
 ```bash
-cp target/terrain-lab-0.2.0.jar /path/to/paper-server/plugins/
+cp target/terrain-lab-0.3.0.jar /path/to/paper-server/plugins/
 ```
 
 复制前正常停止服务器，复制后重新启动。源码编译时依赖 Gson 2.14.0 和 Paper API；运行时由 Paper 提供对应依赖。
@@ -424,7 +504,7 @@ python3 tools/test_owned_metadata.py --jdk /path/to/jdk-25 --maven-repo /path/to
 
 **没有在真实 Paper 服务器里完成端到端运行验证，也没有随项目提供真实采样数据。** 测试中的合成数据只是临时格式夹具，不是从 Minecraft 世界采集的训练场景。因此应从第一节的单个 plains 样本开始验证你本机的版本、世界生成、保存、预览和返回流程。
 
-预览沙盒在 0.2.0 中通过了 Maven 构建和上述自测。`play`、`tnt`、`villagerhp` 和 `reset` 已在本地 Paper 26.3 服务器上执行，日志中没有错误；`villagerai` 尚未在游戏内执行。基岩外壳、编辑范围、爆炸和村民相关行为还没有系统验证。首次使用时，请按第 9 节在单个样本上确认这些行为是否符合预期。
+0.3.0 通过了 Maven 构建和上述自测。在本地 Paper 26.3 服务器上执行过 `startyml`、`-continue` 和 `clearsamples`，并对生成的 `samplingseed.yml` 运行过 `tools/check_sample_overlap.py`。预览沙盒命令 `play`、`tnt`、`villagerai`、`villagerhp` 和 `reset` 也在该服务器上执行过。服务器日志中没有 TerrainLab 错误。基岩外壳、编辑范围和爆炸还没有系统验证。首次使用沙盒时，请按第 9 节在单个样本上确认其行为是否符合预期。
 
 后续接入 NPC 避险时，需要增加：实际可站立起点与目标点、实体/路径边界记录、保留原维度和绝对高度的实验世界、每次试验的完整复位、TNT 与 NPC 的初始状态、动作请求与实际运动的区分、伤害后的真实生命值、终止原因和多次重复试验。对于水域、熔岩、重力方块、红石或额外 NBT 相关场景，还需要专门设计可重复的回放策略。
 
