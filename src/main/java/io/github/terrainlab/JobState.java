@@ -54,11 +54,11 @@ public final class JobState {
         for (Bucket b : buckets) total = Math.addExact(total, quota(b));
         return total;
     }
-    /** Distinct earlier centres in one seed/dimension/biome bucket; repeated positions count once. */
-    public static int existing(Collection<SampleRef> samples, String seed, String dimension, String biome) {
+    /** Distinct earlier centres in one seed/dimension/biome bucket, minus excluded ids; repeated positions count once. */
+    public static int existing(Collection<SampleRef> samples, Set<String> excluded, String seed, String dimension, String biome) {
         Set<List<Object>> positions = new HashSet<>();
         for (SampleRef s : samples) {
-            if (s.seed().equals(seed) && s.dimension().equals(dimension) && s.biome().equals(biome)) {
+            if (!excluded.contains(s.id()) && s.seed().equals(seed) && s.dimension().equals(dimension) && s.biome().equals(biome)) {
                 positions.add(List.of(s.x(), s.y(), s.z()));
             }
         }

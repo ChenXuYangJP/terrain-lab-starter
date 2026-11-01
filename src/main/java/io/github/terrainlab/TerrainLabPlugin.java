@@ -173,7 +173,8 @@ public final class TerrainLabPlugin extends JavaPlugin {
         s.sendMessage("/terrain clearsamples [confirm <code>|cancel]  (permanently deletes all samples and job records)");
         s.sendMessage("/terrain start <seed1,seed2,...> <per-biome> [all|overworld|nether|end] [biome_key] [-continue]");
         s.sendMessage("/terrain startyml <per-biome> [all|overworld|nether|end] [biome_key] [-continue]  (seeds from worldseeds.yml)");
-        s.sendMessage("-continue: avoid earlier centres of these seeds and top each seed+biome up to <per-biome> in total");
+        s.sendMessage("-continue: avoid earlier centres of these seeds and top each seed+biome up to <per-biome> in total;"
+                + " samples in " + SeedFiles.UNSUPPORTED_TERRAIN + " do not count");
         s.sendMessage("/terrain show <sample_id> [core|context] | gallery <page> [core|context] | goto <1..9> | leave");
         s.sendMessage("/terrain play [slot] | tnt [slot] [fuse_ticks] | villagerai [on|off] | villagerhp [on|off] | reset  (sandbox; never saved to samples)");
         s.sendMessage("Quick check: /terrain start 101 1 overworld minecraft:plains");
@@ -269,13 +270,17 @@ public final class TerrainLabPlugin extends JavaPlugin {
             JobState.Bucket b = new JobState.Bucket();
             b.seed = Long.toString(seed); b.dimension = target.dimension(); b.biome = target.biome(); created.buckets.add(b);
         }
+        long uncounted = 0;
         if (continuation) {
             created.continuation = true;
             created.avoid = earlierSamples(new java.util.HashSet<>(seeds.stream().map(String::valueOf).toList()));
             // A fresh search order; salt 0 would retrace the earlier jobs' candidates step by step.
             do { created.samplingSalt = secureRandom.nextLong(); } while (created.samplingSalt == 0);
+            // Samples moved out by tools/check_tnt_support.py stay avoided but leave their bucket to be refilled.
+            Set<String> unsupported = SeedFiles.readSampleIds(getDataFolder().toPath().resolve(SeedFiles.UNSUPPORTED_TERRAIN));
+            uncounted = created.avoid.stream().filter(s -> unsupported.contains(s.id())).count();
             for (JobState.Bucket b : created.buckets) {
-                b.quota = Math.max(0, quota - JobState.existing(created.avoid, b.seed, b.dimension, b.biome));
+                b.quota = Math.max(0, quota - JobState.existing(created.avoid, unsupported, b.seed, b.dimension, b.biome));
             }
             if (created.target() == 0) {
                 throw new IllegalArgumentException("Every seed+biome already has " + quota + " or more samples; nothing to collect.");
@@ -290,7 +295,8 @@ public final class TerrainLabPlugin extends JavaPlugin {
                 + " seeds x " + targets.size() + " biome tags x " + (continuation ? "top-up to " : "") + quota + "). Shortfalls are reported.");
         if (continuation) {
             long full = job.buckets.stream().filter(b -> job.quota(b) == 0).count();
-            sender.sendMessage("Continuing: avoiding " + job.avoid.size() + " earlier centre(s) for these seeds; " + full + " of "
+            sender.sendMessage("Continuing: avoiding " + job.avoid.size() + " earlier centre(s) for these seeds, of which " + uncounted
+                    + " listed in " + SeedFiles.UNSUPPORTED_TERRAIN + " do not count; " + full + " of "
                     + job.buckets.size() + " seed+biome bucket(s) already have " + quota + "; collecting " + job.target() + " more.");
         }
         sender.sendMessage("Seeds from " + seedSource + ": " + String.join(", ", seeds.stream().map(String::valueOf).toList()));

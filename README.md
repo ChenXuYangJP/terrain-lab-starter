@@ -120,6 +120,7 @@ seeds:
 ```
 
 - **补足到 N。** 已有样本计入每类数量，每个 seed × 维度 × biome 只补足差额。例如 seed 101 的 plains 已有 1 个，`startyml 9 -continue` 再采 8 个，合计 9 个；已有 9 个或更多的组合直接跳过。上次因找不到合格位置而缺额的组合会在本次重试，并获得新的候选预算。重复位置只计一次。所有组合都已满足时，命令会拒绝启动。
+- **不支持的样本不计数。** `samplingseed_unsupported_terrain.yml`（由 `tools/check_tnt_support.py -moveout` 写入，见下文）中列出的样本不计入每类数量，因此其 seed × 维度 × biome 会重新补足；这些样本的位置仍会被避开。该文件存在但无法读取时，命令会拒绝启动。
 - **避开已有中心。** 已有样本就是 `samplingseed.yml` 中列出的那些（来自 `jobs/` 的任务记录）。新中心与这些 seed 下的已有中心之间使用与任务内相同的规则：同一维度内至少相距 48 格，上下文区域不能重叠，不区分 biome。因此被拒绝的候选在 report CSV 中记为 `near_or_overlapping_earlier_job_sample`。
 - **新的搜索顺序。** 续采任务使用新的随机盐，不会重走旧任务的路径；盐保存在任务文件中，`resume` 时行为一致。
 
@@ -164,7 +165,7 @@ python3 tools/check_tnt_support.py /path/to/samplingseed.yml -moveout
 - **TNT：** 放在中心的 TNT 会穿过草、花、一层雪、藤蔓等没有碰撞箱的方块向下落。落入水、岩浆或其他液体，或一直到核心底部都没有可停留的方块，则不通过。
 - **村民：** 需要在距中心水平 1–8 格（欧氏距离，可用 `--radius` 修改）的某一列中，有一个位于 dy −5 到 +3 的站立方块，且其上方两格空闲，这样村民整体都在核心区域内。站立方块必须有碰撞箱，且不是液体、岩浆块、仙人掌、营火、栅栏或墙；上方两格不能有碰撞箱、液体或危险方块。
 
-碰撞判断来自脚本中的方块名表，而非 Minecraft 的实际形状；表中未知的方块名一律视为实心。`-moveout` 把被标记的条目移到同目录的 `samplingseed_unsupported_terrain.yml`，该文件已存在时追加写入。样本文件缺失或与条目不一致的条目会被报告并保留。与重叠检查一样，插件下次重写 `samplingseed.yml` 时被移出的条目会重新出现。退出码：0 表示没有被标记的条目（或 `-moveout` 成功）且所有条目都已检查，1 表示仍有被标记的条目留在文件中或有条目无法检查，2 表示文件无法读取、格式错误或写入失败。
+碰撞判断来自脚本中的方块名表，而非 Minecraft 的实际形状；表中未知的方块名一律视为实心。`-moveout` 把被标记的条目移到同目录的 `samplingseed_unsupported_terrain.yml`，该文件已存在时追加写入。样本文件缺失或与条目不一致的条目会被报告并保留。之后带 `-continue` 的 `start` 或 `startyml` 会读取该文件，不计入其中的样本，因此相应组合会重新补足。与重叠检查一样，插件下次重写 `samplingseed.yml` 时被移出的条目会重新出现。退出码：0 表示没有被标记的条目（或 `-moveout` 成功）且所有条目都已检查，1 表示仍有被标记的条目留在文件中或有条目无法检查，2 表示文件无法读取、格式错误或写入失败。
 
 ## 3. 位置筛选实际保证什么
 
@@ -474,6 +475,7 @@ context 的 X/Z 可配置为 25～59 的奇数，Y 可配置为 11～63 的奇�
 | `tools/check_sample_overlap.py` | 找出 `samplingseed.yml` 中核心区域重叠的采样中心 |
 | `tools/check_tnt_support.py` | 找出无法放置 TNT 或 1–8 格内没有村民站位的采样中心 |
 | `tools/test_tnt_support.py` | TNT/村民支撑检查工具的自测，只需 Python |
+| `tools/test_continue_exclusions.py` | `-continue` 读取 `samplingseed_unsupported_terrain.yml` 与组合计数的自测 |
 | `tools/test_snapshot_io.py` | Java/Python 格式与文件行为自测 |
 | `tools/test_owned_metadata.py` | Paper 世界身份元数据 NBT 解析与拒绝逻辑自测 |
 | `pom.xml` | Java、Paper API 和 Gson 构建依赖 |
@@ -515,6 +517,13 @@ python3 tools/test_snapshot_io.py --jdk /path/to/jdk-25 --gson /path/to/gson-2.1
 
 ```bash
 python3 tools/test_owned_metadata.py --jdk /path/to/jdk-25 --maven-repo /path/to/local-maven-repository
+```
+
+`-continue` 排除逻辑的测试同样在 Maven 构建后运行；支撑检查工具的测试只需 Python：
+
+```bash
+python3 tools/test_continue_exclusions.py --jdk /path/to/jdk-25 --maven-repo /path/to/local-maven-repository
+python3 tools/test_tnt_support.py
 ```
 
 元数据测试使用临时合成 NBT 文件和实际编译类，不启动服务器，也不代表真实世界创建与重载已验证。

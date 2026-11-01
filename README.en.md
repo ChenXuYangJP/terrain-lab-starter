@@ -120,6 +120,7 @@ Add `-continue` at the end of `start` or `startyml` to build on the samples you 
 ```
 
 - **Top up to N.** Existing samples count toward the per-biome number, and each seed × dimension × biome only collects the difference. For example, if seed 101 already has 1 plains sample, `startyml 9 -continue` collects 8 more, for 9 in total; combinations that already have 9 or more are skipped. Combinations that fell short last time because no good position was found are retried, with a fresh candidate budget. Repeated positions count once. If every combination is already full, the command refuses to start.
+- **Unsupported samples don't count.** Samples listed in `samplingseed_unsupported_terrain.yml` (written by `tools/check_tnt_support.py -moveout`, see below) are left out of the per-biome count, so their seed × dimension × biome is topped up again. Their positions are still avoided. If that file exists but cannot be read, the command refuses to start.
 - **Avoid existing centers.** The existing samples are the ones listed in `samplingseed.yml` (from the job records in `jobs/`). New centers follow the same rules against them as within a job: at least 48 blocks apart in the same dimension, with no overlapping context regions, regardless of biome. Candidates rejected for this appear in the report CSV as `near_or_overlapping_earlier_job_sample`.
 - **A fresh search order.** A continuation job uses a new random salt, so it doesn't retrace earlier jobs. The salt is saved in the job file, so `resume` behaves the same.
 
@@ -164,7 +165,7 @@ Only the 25 × 25 × 11 core is inspected. A sample is flagged when either check
 - **TNT:** a TNT at the center falls through blocks without collision, such as grass, flowers, a single snow layer or vines. The check fails if the TNT lands in water, lava or another liquid, or finds nothing to rest on down to the bottom of the core.
 - **Villager:** a villager needs a column 1–8 blocks from the center (horizontal Euclidean distance; change it with `--radius`) with a standing block between dy −5 and +3 and two free cells above it. That keeps the villager inside the core. The standing block must have collision and must not be liquid, magma, cactus, a campfire, a fence or a wall. The two free cells must have no collision, liquid or hazard.
 
-Collision comes from a name table in the script, not from Minecraft's shapes; block names it does not know are treated as solid. `-moveout` moves the flagged entries into `samplingseed_unsupported_terrain.yml` next to it, appending if that file exists. Entries whose sample file is missing or does not match are reported and kept. As with the overlap checker, the plugin's next rewrite of `samplingseed.yml` brings moved entries back. Exit status: 0 nothing flagged (or `-moveout` succeeded) and every entry checked, 1 flagged entries left in place or entries that could not be checked, 2 unreadable or malformed file or failed write.
+Collision comes from a name table in the script, not from Minecraft's shapes; block names it does not know are treated as solid. `-moveout` moves the flagged entries into `samplingseed_unsupported_terrain.yml` next to it, appending if that file exists. Entries whose sample file is missing or does not match are reported and kept. A later `start` or `startyml` with `-continue` reads that file and does not count its samples, so their buckets are topped up again. As with the overlap checker, the plugin's next rewrite of `samplingseed.yml` brings moved entries back. Exit status: 0 nothing flagged (or `-moveout` succeeded) and every entry checked, 1 flagged entries left in place or entries that could not be checked, 2 unreadable or malformed file or failed write.
 
 ## 3. What site filtering actually guarantees
 
@@ -474,6 +475,7 @@ Open the whole `terrain-lab-starter` folder in VS Code and edit the `.java` file
 | `tools/check_sample_overlap.py` | Finds sampling centers in `samplingseed.yml` whose core boxes overlap |
 | `tools/check_tnt_support.py` | Finds sampling centers that cannot hold a TNT or have no villager spot 1–8 blocks away |
 | `tools/test_tnt_support.py` | Self-tests for the TNT/villager support checker, Python only |
+| `tools/test_continue_exclusions.py` | Self-tests for how `-continue` reads `samplingseed_unsupported_terrain.yml` and counts buckets |
 | `tools/test_snapshot_io.py` | Java/Python format and file behavior self-tests |
 | `tools/test_owned_metadata.py` | Self-tests for parsing and rejecting Paper world identity metadata NBT |
 | `pom.xml` | Java, Paper API and Gson build dependencies |
@@ -515,6 +517,13 @@ A Maven build has actually been completed with JDK 25 and Paper API `26.3.build.
 
 ```bash
 python3 tools/test_owned_metadata.py --jdk /path/to/jdk-25 --maven-repo /path/to/local-maven-repository
+```
+
+The `-continue` exclusion tests also run after a Maven build, and the support checker's tests need only Python:
+
+```bash
+python3 tools/test_continue_exclusions.py --jdk /path/to/jdk-25 --maven-repo /path/to/local-maven-repository
+python3 tools/test_tnt_support.py
 ```
 
 The metadata tests use temporary synthetic NBT files and the actual compiled classes. They do not start a server, and passing them does not mean real world creation and reloading have been verified.

@@ -1,24 +1,33 @@
 package io.github.terrainlab;
 
 import com.google.gson.Gson;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * worldseeds.yml is user input for /terrain startyml. samplingseed.yml is a view
  * derived from job checkpoints; it is only ever written, never read back.
+ * samplingseed_unsupported_terrain.yml is written by tools/check_tnt_support.py and
+ * only read here, so that -continue does not count the samples it lists.
  */
 public final class SeedFiles {
     public static final String WORLD_SEEDS = "worldseeds.yml";
     public static final String SAMPLING_SEEDS = "samplingseed.yml";
+    public static final String UNSUPPORTED_TERRAIN = "samplingseed_unsupported_terrain.yml";
+    private static final Pattern SAMPLE_ID = Pattern.compile("sample_[a-z0-9_]{1,100}");
     private static final Gson GSON = new Gson();
     private static final String SAMPLING_HEADER = """
             # TerrainLab sampling centers, grouped by world seed.
@@ -68,6 +77,30 @@ public final class SeedFiles {
             }
         }
         return seeds;
+    }
+
+    /** Sample ids in a samplingseed.yml-layout file such as UNSUPPORTED_TERRAIN; a missing file lists none. */
+    public static Set<String> readSampleIds(Path file) throws IOException {
+        Set<String> ids = new HashSet<>();
+        if (!Files.exists(file)) return ids;
+        String name = file.getFileName().toString();
+        YamlConfiguration yaml = new YamlConfiguration();
+        try { yaml.load(file.toFile()); }
+        catch (InvalidConfigurationException error) {
+            throw new IllegalArgumentException(name + " is not valid YAML: " + error.getMessage());
+        }
+        ConfigurationSection seeds = yaml.getConfigurationSection("world_seeds");
+        if (seeds == null) throw new IllegalArgumentException(name + " has no world_seeds map.");
+        for (String seed : seeds.getKeys(false)) {
+            if (!seeds.isList(seed)) throw new IllegalArgumentException(name + ": seed " + seed + " must hold a list of samples.");
+            for (Map<?, ?> entry : seeds.getMapList(seed)) {
+                if (!(entry.get("sample") instanceof String id) || !SAMPLE_ID.matcher(id).matches()) {
+                    throw new IllegalArgumentException(name + ": seed " + seed + " has an entry without a valid sample id.");
+                }
+                ids.add(id);
+            }
+        }
+        return ids;
     }
 
     /** Jobs in the given map order, samples in their accepted order, grouped by seed. */
