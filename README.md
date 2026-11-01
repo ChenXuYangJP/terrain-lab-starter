@@ -1,6 +1,8 @@
 # TerrainLab：自然地形采集与游戏内预览
 
-TerrainLab 是一个独立的 **Paper 26.3 / Java 25** 插件，用于先建立地形数据集，再为后续 NPC 避险实验准备场景。当前阶段只采集方块和生物群系标签，不创建实验 NPC、不引爆 TNT，也不保存动物、怪物或其他来源实体。它与先前的 `NpcLab` 使用不同插件名、命令和数据目录，可以同时安装。
+中文 | [English](README.en.md)
+
+TerrainLab 是一个独立的 **Paper 26.3 / Java 25** 插件，用于先建立地形数据集，再为后续 NPC 避险实验准备场景。当前阶段只采集方块和生物群系标签：采集过程不创建实验 NPC、不引爆 TNT，也不保存动物、怪物或其他来源实体。只有预览沙盒可以通过显式命令 `/terrain tnt` 生成 TNT，沙盒中的结果不会保存。它与先前的 `NpcLab` 使用不同插件名、命令和数据目录，可以同时安装。
 
 每个样本包含以候选中心为原点的 **25×25×11 核心区域**，以及默认 **41×41×25 上下文区域**。样本保存为 UTF-8 JSON 的 gzip 文件，可以用 Python 直接读取，也可以在游戏内逐个查看或按九宫格分页展示。
 
@@ -17,7 +19,7 @@ TerrainLab 是一个独立的 **Paper 26.3 / Java 25** 插件，用于先建立�
 
 ### 使用提供的 JAR
 
-从 [GitHub Releases](https://github.com/ChenXuYangJP/terrain-lab-starter/releases/tag/v0.1.0) 下载预编译的 `terrain-lab-0.1.0.jar` 和 `SHA256SUMS.txt`，放在同一目录下可以先校验文件：
+从 [GitHub Releases](https://github.com/ChenXuYangJP/terrain-lab-starter/releases/tag/v0.2.0) 下载预编译的 `terrain-lab-0.2.0.jar` 和 `SHA256SUMS.txt`，放在同一目录下可以先校验文件：
 
 ```bash
 sha256sum -c SHA256SUMS.txt
@@ -26,10 +28,12 @@ sha256sum -c SHA256SUMS.txt
 在服务器控制台执行 `stop`，等待服务器正常退出，然后将 JAR 复制到服务器 `plugins` 目录：
 
 ```bash
-cp terrain-lab-0.1.0.jar /path/to/paper-server/plugins/
+cp terrain-lab-0.2.0.jar /path/to/paper-server/plugins/
 ```
 
 把示例路径改成自己的服务器目录，按原来的方式启动 Paper。首次启动会生成 `plugins/TerrainLab/config.yml`。服务端日志应出现 `TerrainLab ready`。
+
+从旧版本升级时，先删除 `plugins` 中旧的 `terrain-lab-0.1.0.jar`，再复制新 JAR，否则 Paper 会发现两个同名插件而拒绝重复加载。`plugins/TerrainLab/` 中的配置、样本和任务文件保持不变。
 
 这个 JAR 是服务端插件，放在 Paper 服务器的 `plugins` 目录，不需要放进客户端。普通 Minecraft 客户端可以连接和观看。
 
@@ -294,11 +298,43 @@ print(center_block, center_biome, seed)
 
 `list` 每页列出 10 个 ID；`gallery` 每页最多放 9 个样本，编号 1～9。页码从 1 开始，样本按 ID 排序，不保证与采集时间顺序一致。`show` 只展示指定样本，省略模式时默认为 `core`。`goto` 跳到当前页指定位置，`leave` 恢复进入预览前的返回位置和游戏模式。
 
-预览使用单个共享的专用 NORMAL 世界，所有来源维度都摆到约 `Y=96` 的展示高度；实际锚点保留源坐标模 4 的对齐。九宫格中心间隔为 64 格。玩家以 spectator 模式观看，插件分批粘贴方块，并尽量抑制预览中的爆炸、放置破坏、流动和方块更新。换页会更新共享展示，不是每位玩家各有一份独立场景。
+预览使用单个共享的专用 NORMAL 世界，所有来源维度都摆到约 `Y=96` 的展示高度；实际锚点保留源坐标模 4 的对齐。九宫格中心间隔为 64 格。玩家以 spectator 模式观看（下文的 `play` 沙盒除外），插件分批粘贴方块，并尽量抑制预览中的爆炸、放置破坏、流动和方块更新。换页会更新共享展示，不是每位玩家各有一份独立场景。
 
 保持 biome 格点对齐有助于展示，但预览世界的 seed、绝对坐标、维度和周围环境已变化，所以 F3 的 computed biome、混色、天空与光照仍可能不同。核对原始标签时看样本 metadata 和 `biome_indices`。
 
 预览省略了额外 NBT 和计划 tick，也没有复制来源维度的完整运行状态。关闭随机 tick、取消部分事件、用 `applyPhysics=false` 粘贴，均不能证明所有原版机制都被冻结。**请把它用于观察地形形状、比较遮挡和检查采样质量；未来的爆炸实验需要专门的回放与复位流程。**
+
+### 沙盒游玩模式
+
+```text
+/terrain play
+/terrain play 3
+/terrain tnt
+/terrain tnt 1 20
+/terrain villagerai
+/terrain villagerhp
+/terrain reset
+/terrain goto 1
+/terrain leave
+```
+
+预览完成后，`play [格位]` 在共享预览中打开沙盒：先在当前页每个样本外侧铺一层基岩外壳，再把执行者切换为 creative，传送到指定格位（默认 1）的样本中心。之后可以放置和破坏方块、倒水、用刷怪蛋生成生物，方块物理按正常规则运行：重力方块下落、流体流动、活塞推动、TNT 和苦力怕破坏方块、火焰蔓延。沙盒期间开启生物破坏、火焰蔓延和掉落物；随机刻仍为 0，因此作物不生长，被裁断的树叶也不会自然腐烂；自然刷怪、昼夜和天气仍保持关闭。
+
+基岩外壳厚 1 格：底板紧贴样本最底层下方，四面侧墙立在底板上，比样本最顶层高 2 格，顶部敞开。外壳只存在于预览世界，不属于样本数据。
+
+沙盒内的方块变化只允许发生在“编辑盒”内，即样本本身的范围加上其上方 16 格的建造空间。编辑盒以外的方块变化会被取消，包括外壳本身、漫过墙顶的流体和相邻格位，因此 creative 玩家也不能拆除外壳。实体和玩家可以离开编辑盒，掉进周围虚空的生物会消失。
+
+`tnt [格位] [引信tick]` 在指定格位的样本中心（采集时的候选中心）生成一个已点燃的 TNT。默认格位 1、引信 80 tick（约 4 秒），引信范围 0～600。只有沙盒打开时才能使用；爆炸只破坏编辑盒内的方块，插件不记录爆炸结果。
+
+预览世界中生成的村民默认不使用原版行为：插件把它们设为 unaware，因此不会自行走动、工作、睡觉、聚集或逃跑，但仍受重力、推挤、伤害和击退影响（Paper 说明 unaware 生物还可能关闭溺水等未列明行为）。`villagerai [on|off]` 切换这一设置，不带参数时在开和关之间切换；切换会立即作用于预览世界中已有的村民，之后生成的村民也按新设置处理。默认关闭，服务器重启后恢复为关闭。只影响村民，不影响其他生物，也不影响其他世界。
+
+`villagerhp [on|off]` 在预览世界中每个村民头顶显示当前生命值，例如 `❤ 17.5 / 20`：高于 50% 为绿色，高于 25% 为黄色，其余为红色。受到伤害或回复生命后，标签在下一 tick 更新；死亡时显示 0。切换方式与 `villagerai` 相同，不带参数时在开和关之间切换，并立即作用于已有村民和之后生成的村民。默认关闭，服务器重启后恢复为关闭。标签使用村民的名称显示，开启期间会覆盖命名牌设置的名字；关闭时只清除插件设置的标签。只影响村民。
+
+**沙盒改动永远不会写回 `samples/`。** 画廊只读取样本文件，改动只发生在预览世界中。`reset` 从磁盘重新读取当前展示的样本并重新粘贴，清除所有改动、外壳、生物和掉落物；任何新的 `show` 或 `gallery` 也会先结束沙盒并做同样的清理。外壳和建造空间在铺设前已记入 `gallery-state.yml`，即使服务器在游玩中崩溃，下一次展示仍会清理它们。重新渲染时，预览中的玩家会切回 spectator，`leave` 仍恢复进入前的位置和游戏模式。
+
+沙盒是共享场景，所有在预览中的玩家看到同一份改动。`goto` 回到 spectator 观察视角；再次执行 `play` 直接回到沙盒，不会重铺外壳。
+
+外壳是人为边界，样本边缘处的流体、重力方块和光照与来源世界不同。例如裁断面上的水会被侧墙挡住；最底层的重力方块由基岩底板而不是原有地层支撑。沙盒仍然不是原版物理的严格回放；其中的 TNT 只用于目视检查，不是未来爆炸实验所需的回放与复位流程。
 
 ## 10. 性能、存储和配置
 
@@ -339,11 +375,12 @@ context 的 X/Z 可配置为 25～59 的奇数，Y 可配置为 11～63 的奇�
 | `OwnedWorlds.java` | 专用来源/预览世界与所有权核验 |
 | `TerrainSnapshot.java` | 纯数据模型、坐标索引与一致性验证 |
 | `SnapshotIO.java` | gzip JSON、原子发布、hash 与读取 |
-| `Gallery.java` | 游戏内单样本和分页展示 |
+| `Gallery.java` | 游戏内单样本和分页展示、沙盒游玩模式 |
 | `tools/inspect_terrain.py` | 无 Minecraft 依赖的样本检查 |
 | `tools/test_snapshot_io.py` | Java/Python 格式与文件行为自测 |
 | `tools/test_owned_metadata.py` | Paper 世界身份元数据 NBT 解析与拒绝逻辑自测 |
 | `pom.xml` | Java、Paper API 和 Gson 构建依赖 |
+| `README.en.md` | 本文档的英文版 |
 
 确保 `java -version`、`javac -version` 和 `mvn -version` 都使用 JDK 25，再在项目根目录执行：
 
@@ -354,13 +391,13 @@ mvn package
 新 JAR 位于：
 
 ```text
-target/terrain-lab-0.1.0.jar
+target/terrain-lab-0.2.0.jar
 ```
 
 修改代码后的安装操作应复制这个新的 `target` 文件；`dist` 中的预编译副本不会因你编辑源码而自动更新。
 
 ```bash
-cp target/terrain-lab-0.1.0.jar /path/to/paper-server/plugins/
+cp target/terrain-lab-0.2.0.jar /path/to/paper-server/plugins/
 ```
 
 复制前正常停止服务器，复制后重新启动。源码编译时依赖 Gson 2.14.0 和 Paper API；运行时由 Paper 提供对应依赖。
@@ -386,6 +423,8 @@ python3 tools/test_owned_metadata.py --jdk /path/to/jdk-25 --maven-repo /path/to
 元数据测试使用临时合成 NBT 文件和实际编译类，不启动服务器，也不代表真实世界创建与重载已验证。
 
 **没有在真实 Paper 服务器里完成端到端运行验证，也没有随项目提供真实采样数据。** 测试中的合成数据只是临时格式夹具，不是从 Minecraft 世界采集的训练场景。因此应从第一节的单个 plains 样本开始验证你本机的版本、世界生成、保存、预览和返回流程。
+
+预览沙盒在 0.2.0 中通过了 Maven 构建和上述自测。`play`、`tnt`、`villagerhp` 和 `reset` 已在本地 Paper 26.3 服务器上执行，日志中没有错误；`villagerai` 尚未在游戏内执行。基岩外壳、编辑范围、爆炸和村民相关行为还没有系统验证。首次使用时，请按第 9 节在单个样本上确认这些行为是否符合预期。
 
 后续接入 NPC 避险时，需要增加：实际可站立起点与目标点、实体/路径边界记录、保留原维度和绝对高度的实验世界、每次试验的完整复位、TNT 与 NPC 的初始状态、动作请求与实际运动的区分、伤害后的真实生命值、终止原因和多次重复试验。对于水域、熔岩、重力方块、红石或额外 NBT 相关场景，还需要专门设计可重复的回放策略。
 

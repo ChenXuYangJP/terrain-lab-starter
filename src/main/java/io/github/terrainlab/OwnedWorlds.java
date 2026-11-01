@@ -78,6 +78,20 @@ public final class OwnedWorlds {
         return world;
     }
 
+    /**
+     * Live-physics rules for the preview play sandbox. Off restores the preview
+     * values from applyRules, which also reapplies them on every open.
+     */
+    public void setPreviewSandbox(World world, boolean on) {
+        requireMainThread();
+        if (!isPreview(world)) throw new IllegalArgumentException("Not the TerrainLab preview world.");
+        world.setGameRule(GameRule.MOB_GRIEFING, on);
+        world.setGameRule(GameRule.DO_FIRE_TICK, on);
+        world.setGameRule(GameRule.DO_TILE_DROPS, on);
+        world.setGameRule(GameRule.DO_ENTITY_DROPS, on);
+        world.setGameRule(GameRule.DO_MOB_LOOT, on);
+    }
+
     public boolean isOwnedSource(World world) {
         if (world == null) return false;
         Source source = sources.get(world.getUID());

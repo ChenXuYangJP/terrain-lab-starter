@@ -1,18 +1,26 @@
 package io.github.terrainlab;
 
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.block.Biome;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Display;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.TNTPrimed;
 import org.bukkit.entity.TextDisplay;
+import org.bukkit.entity.Villager;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -20,11 +28,14 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockBurnEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.block.BlockFadeEvent;
+import org.bukkit.event.block.BlockFertilizeEvent;
 import org.bukkit.event.block.BlockFormEvent;
 import org.bukkit.event.block.BlockFromToEvent;
 import org.bukkit.event.block.BlockGrowEvent;
 import org.bukkit.event.block.BlockIgniteEvent;
+import org.bukkit.event.block.BlockMultiPlaceEvent;
 import org.bukkit.event.block.BlockPhysicsEvent;
+import org.bukkit.event.block.BlockPistonEvent;
 import org.bukkit.event.block.BlockPistonExtendEvent;
 import org.bukkit.event.block.BlockPistonRetractEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
@@ -32,10 +43,15 @@ import org.bukkit.event.block.BlockSpreadEvent;
 import org.bukkit.event.block.LeavesDecayEvent;
 import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.EntityChangeBlockEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.entity.EntityRegainHealthEvent;
+import org.bukkit.event.player.PlayerBucketEmptyEvent;
+import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -57,25 +73,39 @@ import java.util.function.Supplier;
 import java.util.logging.Level;
 
 /**
- * A read-only-in-game, paginated block preview. This deliberately is not an
- * experiment replay: all source dimensions are displayed in one normal world,
- * original absolute height and scheduled updates are not reproduced.
+ * A paginated block preview, read-only unless /terrain play opens a shared
+ * sandbox inside bedrock shells. Sandbox edits stay in the preview world and are
+ * cleared by the next render; sample files are only ever read. This deliberately
+ * is not an experiment replay: all source dimensions are displayed in one normal
+ * world, original absolute height and scheduled updates are not reproduced.
  */
 public final class Gallery implements Listener {
     private static final int PAGE_SIZE = 9;
     private static final int STRIDE = 64;
+    private static final int PLAY_HEADROOM = 16;
+    private static final int DEFAULT_FUSE_TICKS = 80;
+    private static final BlockData AIR = Material.AIR.createBlockData();
+    private static final BlockData BEDROCK = Material.BEDROCK.createBlockData();
     private final TerrainLabPlugin plugin;
     private final SnapshotIO store;
     private final NamespacedKey returnKey;
     private final NamespacedKey labelKey;
+    private final NamespacedKey hpKey;
     private final Path stateFile;
     private final BukkitTask ticker;
     private final Map<Integer, Location> anchors = new LinkedHashMap<>();
     private List<Region> previousRegions = new ArrayList<>();
+    private List<Region> shown = List.of();
+    private List<Region> editBoxes = List.of();
+    private List<String> lastIds;
+    private String lastMode;
     private World world;
     private UUID managedWorldId;
     private boolean stateLoaded;
     private boolean busy;
+    private boolean sandbox;
+    private boolean villagerAi;
+    private boolean villagerHp;
     private volatile boolean closed;
     private Render render;
 
@@ -84,6 +114,7 @@ public final class Gallery implements Listener {
         this.store = store;
         this.returnKey = new NamespacedKey(plugin, "preview_return");
         this.labelKey = new NamespacedKey(plugin, "preview_label");
+        this.hpKey = new NamespacedKey(plugin, "villager_hp_label");
         this.stateFile = plugin.getDataFolder().toPath().resolve("gallery-state.yml");
         Bukkit.getPluginManager().registerEvents(this, plugin);
         ticker = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 1L, 1L);
@@ -135,7 +166,68 @@ public final class Gallery implements Listener {
                 catch (NumberFormatException error) { throw new IllegalArgumentException("Slot must be 1..9."); }
                 Location anchor = anchors.get(slot);
                 if (anchor == null) throw new IllegalArgumentException("This preview has no such slot. Open a gallery first.");
-                enter(player, camera(anchor));
+                enter(player, camera(anchor), GameMode.SPECTATOR);
+                return true;
+            }
+            case "play" -> {
+                if (args.length > 2) throw new IllegalArgumentException("Usage: /terrain play [slot 1..9]");
+                int slot = args.length == 2 ? integer(args[1], 1, PAGE_SIZE, "Slot") : 1;
+                if (closed) throw new IllegalArgumentException("Gallery is shutting down.");
+                if (busy) throw new IllegalArgumentException("A preview is being prepared. Please wait.");
+                if (shown.isEmpty() || anchors.get(slot) == null) {
+                    throw new IllegalArgumentException("No finished preview has that slot. Use /terrain show or /terrain gallery first.");
+                }
+                if (sandbox) enterPlay(player, slot);
+                else startSandbox(player, slot);
+                return true;
+            }
+            case "tnt" -> {
+                if (args.length > 3) throw new IllegalArgumentException("Usage: /terrain tnt [slot 1..9] [fuse_ticks 0..600]");
+                int slot = args.length >= 2 ? integer(args[1], 1, PAGE_SIZE, "Slot") : 1;
+                int fuse = args.length == 3 ? integer(args[2], 0, 600, "Fuse ticks") : DEFAULT_FUSE_TICKS;
+                if (!sandbox || render != null) throw new IllegalArgumentException("TNT needs the play sandbox; use /terrain play first.");
+                Location anchor = anchors.get(slot);
+                if (anchor == null) throw new IllegalArgumentException("This preview has no such slot.");
+                Location point = anchor.clone().add(0.5, 0.0, 0.5);
+                world.spawn(point, TNTPrimed.class, tnt -> {
+                    tnt.setFuseTicks(fuse);
+                    tnt.setSource(player);
+                });
+                player.sendMessage("TerrainLab: primed TNT at sample center (" + point.getBlockX() + "," + point.getBlockY()
+                        + "," + point.getBlockZ() + "), fuse " + fuse + " ticks. Sandbox results are not saved.");
+                return true;
+            }
+            case "villagerai" -> {
+                villagerAi = flag(args, villagerAi, "villagerai");
+                int updated = 0;
+                if (world != null) {
+                    for (Villager villager : world.getEntitiesByClass(Villager.class)) { villager.setAware(villagerAi); updated++; }
+                }
+                player.sendMessage("TerrainLab: preview villager AI " + (villagerAi
+                        ? "on: vanilla behaviour."
+                        : "off: villagers act on nothing themselves; gravity, pushing, damage and knockback still apply.")
+                        + " Updated " + updated + " villager(s).");
+                return true;
+            }
+            case "villagerhp" -> {
+                villagerHp = flag(args, villagerHp, "villagerhp");
+                int updated = 0;
+                if (world != null) {
+                    for (Villager villager : world.getEntitiesByClass(Villager.class)) {
+                        if (villagerHp) showHealth(villager);
+                        else hideHealth(villager);
+                        updated++;
+                    }
+                }
+                player.sendMessage("TerrainLab: preview villager health labels " + (villagerHp
+                        ? "on; they replace name-tag names while on." : "off.") + " Updated " + updated + " villager(s).");
+                return true;
+            }
+            case "reset" -> {
+                if (args.length != 1) throw new IllegalArgumentException("Usage: /terrain reset");
+                if (lastIds == null) throw new IllegalArgumentException("Nothing to reset; use /terrain show or /terrain gallery first.");
+                List<String> ids = lastIds;
+                beginRead(player, () -> ids.stream().map(this::loadSnapshot).toList(), lastMode, "reset from sample files");
                 return true;
             }
             case "leave" -> {
@@ -154,6 +246,50 @@ public final class Gallery implements Listener {
             throw new IllegalArgumentException("Preview mode must be core or context.");
         }
         return value;
+    }
+
+    private static int integer(String value, int min, int max, String name) {
+        int result;
+        try { result = Integer.parseInt(value); }
+        catch (NumberFormatException error) { throw new IllegalArgumentException(name + " must be " + min + ".." + max + "."); }
+        if (result < min || result > max) throw new IllegalArgumentException(name + " must be " + min + ".." + max + ".");
+        return result;
+    }
+
+    /** No argument toggles; on/off set the flag directly. */
+    private static boolean flag(String[] args, boolean current, String command) {
+        if (args.length > 2) throw new IllegalArgumentException("Usage: /terrain " + command + " [on|off]");
+        if (args.length == 1) return !current;
+        return switch (args[1].toLowerCase(java.util.Locale.ROOT)) {
+            case "on" -> true;
+            case "off" -> false;
+            default -> throw new IllegalArgumentException("Usage: /terrain " + command + " [on|off]");
+        };
+    }
+
+    private void showHealth(Villager villager) {
+        double health = Math.max(0.0, villager.getHealth());
+        AttributeInstance attribute = villager.getAttribute(Attribute.MAX_HEALTH);
+        double max = attribute == null ? 20.0 : attribute.getValue();
+        double ratio = max > 0 ? health / max : 0.0;
+        NamedTextColor color = ratio > 0.5 ? NamedTextColor.GREEN : ratio > 0.25 ? NamedTextColor.YELLOW : NamedTextColor.RED;
+        villager.customName(Component.text(String.format(java.util.Locale.ROOT, "❤ %.1f / %.0f", health, max), color));
+        villager.setCustomNameVisible(true);
+        villager.getPersistentDataContainer().set(hpKey, PersistentDataType.BYTE, (byte) 1);
+    }
+
+    /** Clears only names this plugin set. */
+    private void hideHealth(Villager villager) {
+        if (!villager.getPersistentDataContainer().has(hpKey, PersistentDataType.BYTE)) return;
+        villager.customName(null);
+        villager.setCustomNameVisible(false);
+        villager.getPersistentDataContainer().remove(hpKey);
+    }
+
+    private void refreshHealthLater(Entity entity) {
+        if (!villagerHp || !(entity instanceof Villager villager) || !protectedWorld(entity.getWorld())) return;
+        // Damage and healing are applied after their events; read health on the next tick.
+        Bukkit.getScheduler().runTask(plugin, () -> { if (villagerHp) showHealth(villager); });
     }
 
     private TerrainSnapshot loadSnapshot(String id) {
@@ -228,7 +364,8 @@ public final class Gallery implements Listener {
             // Persist a conservative union before touching blocks. If a render
             // is interrupted, its next replacement still clears every touched region.
             List<Region> union = union(previousRegions, pastes.stream().map(Paste::region).toList());
-            Render next = new Render(requester, pastes, union, description + " / " + mode);
+            Render next = new Render(requester, pastes, union, AIR, description + " / " + mode, null);
+            endSandbox();
             render = next;
             persistState(union, () -> {
                 if (render != next || closed) return;
@@ -236,9 +373,12 @@ public final class Gallery implements Listener {
                     Player current = Bukkit.getPlayer(requester);
                     if (current == null || !current.isOnline()) { render = null; busy = false; return; }
                     previousRegions = union;
+                    shown = List.of();
+                    lastIds = pastes.stream().map(paste -> paste.snapshot().id()).toList();
+                    lastMode = mode;
                     anchors.clear();
                     anchors.putAll(nextAnchors);
-                    enter(current, camera(pastes.get(0).anchor()));
+                    enter(current, camera(pastes.get(0).anchor()), GameMode.SPECTATOR);
                     for (TextDisplay display : world.getEntitiesByClass(TextDisplay.class)) {
                         if (display.getPersistentDataContainer().has(labelKey, PersistentDataType.BYTE)) display.remove();
                     }
@@ -264,8 +404,8 @@ public final class Gallery implements Listener {
                 int dz = (index / region.sx()) % region.sz();
                 int dy = index / (region.sx() * region.sz());
                 int x = region.x() + dx, y = region.y() + dy, z = region.z() + dz;
-                if (current.clearing) {
-                    world.getBlockAt(x, y, z).setType(Material.AIR, false);
+                if (current.filling) {
+                    world.getBlockAt(x, y, z).setBlockData(current.fill, false);
                 } else {
                     Paste paste = current.pastes.get(current.regionIndex);
                     world.getBlockAt(x, y, z).setBlockData(paste.blocks()[paste.blockIndices()[index]], false);
@@ -273,15 +413,17 @@ public final class Gallery implements Listener {
                 }
             }
             if (current.cursor == region.volume()) {
-                if (!current.clearing) addLabel(current.pastes.get(current.regionIndex));
+                if (!current.filling) addLabel(current.pastes.get(current.regionIndex));
                 releaseTickets(current);
                 current.ready = false;
                 current.cursor = 0;
                 current.regionIndex++;
-                if (current.clearing && current.regionIndex == current.clearRegions.size()) {
-                    current.clearing = false;
+                if (current.filling && current.regionIndex == current.fillRegions.size()) {
+                    current.filling = false;
                     current.regionIndex = 0;
-                } else if (!current.clearing && current.regionIndex == current.pastes.size()) {
+                    // A shell build is fill-only and hands over to its own completion.
+                    if (current.pastes.isEmpty()) { current.finishing = true; current.done.run(); }
+                } else if (!current.filling && current.regionIndex == current.pastes.size()) {
                     finish(current);
                 }
             }
@@ -302,11 +444,13 @@ public final class Gallery implements Listener {
                 if (error != null) { fail(current.requester, "Could not load preview chunk", error); return; }
                 world.addPluginChunkTicket(pos.x(), pos.z(), plugin);
                 current.tickets.add(pos);
-                // Old label chunks may have been unloaded when the render began.
-                // Removing labels here also covers those newly loaded chunks.
-                for (org.bukkit.entity.Entity entity : chunk.getEntities()) {
-                    if (entity instanceof TextDisplay display
-                            && display.getPersistentDataContainer().has(labelKey, PersistentDataType.BYTE)) display.remove();
+                // Old labels and sandbox leftovers may sit in chunks that were unloaded
+                // when the render began. A page render resets those chunks too; a shell
+                // build must keep the labels it was started under.
+                if (!current.pastes.isEmpty()) {
+                    for (Entity entity : chunk.getEntities()) {
+                        if (!(entity instanceof Player)) entity.remove();
+                    }
                 }
                 current.pending--;
                 if (current.pending == 0) { current.waiting = false; current.ready = true; }
@@ -339,11 +483,65 @@ public final class Gallery implements Listener {
         persistState(regions, () -> {
             if (render != current || closed) return;
             previousRegions = regions;
+            shown = regions;
             render = null;
             busy = false;
             message(current.requester, "TerrainLab: preview ready (" + current.description + "), "
-                    + current.pastes.size() + " sample(s). /terrain goto <slot>, /terrain leave.");
+                    + current.pastes.size() + " sample(s). /terrain goto <slot>, /terrain play [slot], /terrain leave.");
         }, error -> fail(current.requester, "Preview is visible but its final checkpoint failed", error));
+    }
+
+    private void startSandbox(Player player, int slot) {
+        UUID requester = player.getUniqueId();
+        List<Region> edits = shown.stream().map(region -> region.editBox(world)).toList();
+        List<Region> clears = shown.stream().map(region -> region.clearBox(world)).toList();
+        for (Region region : clears) region.validate(world);
+        List<Region> shells = shown.stream().flatMap(region -> region.shell().stream()).toList();
+        List<Region> union = union(previousRegions, clears);
+        busy = true;
+        Render next = new Render(requester, List.of(), shells, BEDROCK, "bedrock shell",
+                () -> openSandbox(requester, slot, edits));
+        render = next;
+        player.sendMessage("TerrainLab: building bedrock shells for the sandbox.");
+        // Persist shell and headroom before placing bedrock, so the next render
+        // still clears them after a crash during play.
+        persistState(union, () -> {
+            if (render != next || closed) return;
+            previousRegions = union;
+            next.started = true;
+        }, error -> fail(requester, "Could not checkpoint sandbox regions", error));
+    }
+
+    private void openSandbox(UUID requester, int slot, List<Region> edits) {
+        render = null;
+        plugin.previewSandbox(world, true);
+        editBoxes = edits;
+        sandbox = true;
+        busy = false;
+        Player player = Bukkit.getPlayer(requester);
+        if (player == null || !player.isOnline()) return;
+        try { enterPlay(player, slot); }
+        catch (RuntimeException error) { player.sendMessage("TerrainLab: " + error.getMessage()); }
+    }
+
+    private void enterPlay(Player player, int slot) {
+        enter(player, anchors.get(slot).clone().add(0.5, 0.0, 0.5), GameMode.CREATIVE);
+        player.sendMessage("TerrainLab: sandbox open with live physics; edits stay in the preview world and never reach sample files.");
+        player.sendMessage("/terrain tnt [slot] [fuse], /terrain villagerai [on|off], /terrain villagerhp [on|off], /terrain reset, /terrain goto <slot>, /terrain leave.");
+    }
+
+    /** Called before any re-render: the scene is rebuilt from sample files. */
+    private void endSandbox() {
+        if (world == null) return;
+        if (sandbox) plugin.previewSandbox(world, false);
+        sandbox = false;
+        editBoxes = List.of();
+        for (Player player : world.getPlayers()) {
+            if (hasReturn(player) && player.getGameMode() != GameMode.SPECTATOR) player.setGameMode(GameMode.SPECTATOR);
+        }
+        for (Entity entity : world.getEntities()) {
+            if (!(entity instanceof Player)) entity.remove();
+        }
     }
 
     private void fail(UUID requester, String message, Throwable error) {
@@ -444,7 +642,7 @@ public final class Gallery implements Listener {
         return player.getPersistentDataContainer().has(returnKey, PersistentDataType.STRING);
     }
 
-    private void enter(Player player, Location target) {
+    private void enter(Player player, Location target, GameMode mode) {
         if (!hasReturn(player)) {
             if (protectedWorld(player.getWorld())) {
                 throw new IllegalArgumentException("Join the preview from your normal world so a return point can be saved.");
@@ -458,7 +656,7 @@ public final class Gallery implements Listener {
             // The return record must survive a server crash after changing world or mode.
             player.saveData();
         }
-        player.setGameMode(GameMode.SPECTATOR);
+        player.setGameMode(mode);
         if (!player.teleport(target)) {
             restore(player);
             throw new IllegalArgumentException("Preview teleport was cancelled.");
@@ -516,6 +714,9 @@ public final class Gallery implements Listener {
         if (render != null) releaseTickets(render);
         render = null;
         busy = false;
+        if (sandbox) try { plugin.previewSandbox(world, false); }
+        catch (RuntimeException error) { plugin.getLogger().warning("Preview sandbox rules retained until reopen: " + error.getMessage()); }
+        sandbox = false;
         for (Player player : List.copyOf(Bukkit.getOnlinePlayers())) {
             if (hasReturn(player)) try { restore(player); }
             catch (RuntimeException error) { plugin.getLogger().warning("Preview return retained: " + error.getMessage()); }
@@ -526,42 +727,101 @@ public final class Gallery implements Listener {
         return managedWorldId != null && managedWorldId.equals(candidate.getUID());
     }
 
+    /** True when a preview-world block may not change: always, except inside an edit box of an open sandbox. */
+    private boolean locked(Block block) {
+        if (!protectedWorld(block.getWorld())) return false;
+        if (!sandbox || render != null) return true;
+        for (Region box : editBoxes) if (box.contains(block)) return false;
+        return true;
+    }
+
+    private boolean frozen(World candidate) {
+        return protectedWorld(candidate) && (!sandbox || render != null);
+    }
+
+    private boolean pistonLocked(BlockPistonEvent event, List<Block> moved) {
+        Block piston = event.getBlock();
+        if (locked(piston) || locked(piston.getRelative(event.getDirection()))) return true;
+        for (Block block : moved) {
+            if (locked(block) || locked(block.getRelative(event.getDirection()))) return true;
+        }
+        return false;
+    }
+
     // These reduce mutation during visual inspection. They do not serialize or
-    // freeze the complete Minecraft simulation, and are scoped to our world.
+    // freeze the complete Minecraft simulation, and are scoped to our world. An
+    // open sandbox allows changes inside its edit boxes only, so nothing leaks into
+    // the void, neighbouring slots or the bedrock shells.
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void physics(BlockPhysicsEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void physics(BlockPhysicsEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void fluid(BlockFromToEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void fluid(BlockFromToEvent event) { if (locked(event.getBlock()) || locked(event.getToBlock())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void form(BlockFormEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void form(BlockFormEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void fade(BlockFadeEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void fade(BlockFadeEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void grow(BlockGrowEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void grow(BlockGrowEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void spread(BlockSpreadEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void spread(BlockSpreadEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void leaves(LeavesDecayEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void leaves(LeavesDecayEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void burn(BlockBurnEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void burn(BlockBurnEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void ignite(BlockIgniteEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void ignite(BlockIgniteEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void entityBlock(EntityChangeBlockEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void entityBlock(EntityChangeBlockEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void explode(EntityExplodeEvent event) { if (protectedWorld(event.getLocation().getWorld())) event.setCancelled(true); }
+    public void explode(EntityExplodeEvent event) {
+        if (frozen(event.getLocation().getWorld())) event.setCancelled(true);
+        else event.blockList().removeIf(this::locked);
+    }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void explodeBlock(BlockExplodeEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void explodeBlock(BlockExplodeEvent event) {
+        if (frozen(event.getBlock().getWorld())) event.setCancelled(true);
+        else event.blockList().removeIf(this::locked);
+    }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void spawn(CreatureSpawnEvent event) { if (protectedWorld(event.getLocation().getWorld())) event.setCancelled(true); }
+    public void spawn(CreatureSpawnEvent event) {
+        if (locked(event.getLocation().getBlock())) { event.setCancelled(true); return; }
+        if (!(event.getEntity() instanceof Villager villager) || !protectedWorld(event.getLocation().getWorld())) return;
+        // Unaware villagers keep physics but not their own brain, unless /terrain villagerai is on.
+        if (!villagerAi) villager.setAware(false);
+        if (villagerHp) showHealth(villager);
+    }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void villagerDamaged(EntityDamageEvent event) { refreshHealthLater(event.getEntity()); }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void villagerHealed(EntityRegainHealthEvent event) { refreshHealthLater(event.getEntity()); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void extend(BlockPistonExtendEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void extend(BlockPistonExtendEvent event) { if (pistonLocked(event, event.getBlocks())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void retract(BlockPistonRetractEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void retract(BlockPistonRetractEvent event) { if (pistonLocked(event, event.getBlocks())) event.setCancelled(true); }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void place(BlockPlaceEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void place(BlockPlaceEvent event) {
+        boolean blocked = locked(event.getBlock());
+        if (event instanceof BlockMultiPlaceEvent multi) {
+            for (BlockState state : multi.getReplacedBlockStates()) blocked |= locked(state.getBlock());
+        }
+        if (blocked) event.setCancelled(true);
+    }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void destroy(BlockBreakEvent event) { if (protectedWorld(event.getBlock().getWorld())) event.setCancelled(true); }
+    public void destroy(BlockBreakEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void bucketEmpty(PlayerBucketEmptyEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void bucketFill(PlayerBucketFillEvent event) { if (locked(event.getBlock())) event.setCancelled(true); }
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void structure(StructureGrowEvent event) {
+        if (frozen(event.getLocation().getWorld())) event.setCancelled(true);
+        else event.getBlocks().removeIf(state -> locked(state.getBlock()));
+    }
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void fertilize(BlockFertilizeEvent event) {
+        if (frozen(event.getBlock().getWorld())) event.setCancelled(true);
+        else event.getBlocks().removeIf(state -> locked(state.getBlock()));
+    }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void portal(PlayerPortalEvent event) { if (protectedWorld(event.getFrom().getWorld())) event.setCancelled(true); }
 
@@ -572,7 +832,7 @@ public final class Gallery implements Listener {
     private record Region(int slot, int x, int y, int z, int sx, int sy, int sz) {
         int volume() { return Math.multiplyExact(Math.multiplyExact(sx, sy), sz); }
         void validate(World world) {
-            if (slot < 1 || slot > PAGE_SIZE || sx < 1 || sy < 1 || sz < 1 || sx > 67 || sy > 67 || sz > 67
+            if (slot < 1 || slot > PAGE_SIZE || sx < 1 || sy < 1 || sz < 1 || sx > 67 || sy > 96 || sz > 67
                     || Math.abs(x) > 512 || Math.abs(z) > 512 || y < world.getMinHeight() || y + sy > world.getMaxHeight()) {
                 throw new IllegalArgumentException("Invalid persisted preview region.");
             }
@@ -585,19 +845,45 @@ public final class Gallery implements Listener {
             return new Region(slot, nx, ny, nz, Math.max(x + sx, other.x + other.sx) - nx,
                     Math.max(y + sy, other.y + other.sy) - ny, Math.max(z + sz, other.z + other.sz) - nz);
         }
+        boolean contains(Block block) {
+            int bx = block.getX(), by = block.getY(), bz = block.getZ();
+            return bx >= x && bx < x + sx && by >= y && by < y + sy && bz >= z && bz < z + sz;
+        }
+        /** The pasted sample plus building headroom; sandbox edits are confined here. */
+        Region editBox(World world) {
+            return new Region(slot, x, y, z, sx, Math.min(sy + PLAY_HEADROOM, world.getMaxHeight() - y), sz);
+        }
+        /** The edit box plus its bedrock shell, which a later render must clear. */
+        Region clearBox(World world) {
+            return new Region(slot, x - 1, y - 1, z - 1, sx + 2, editBox(world).sy + 1, sz + 2);
+        }
+        /** One-block bedrock floor under the sample and walls to 2 above its top; the top stays open. */
+        List<Region> shell() {
+            int height = sy + 2;
+            return List.of(new Region(slot, x - 1, y - 1, z - 1, sx + 2, 1, sz + 2),
+                    new Region(slot, x - 1, y, z - 1, 1, height, sz + 2),
+                    new Region(slot, x + sx, y, z - 1, 1, height, sz + 2),
+                    new Region(slot, x, y, z - 1, sx, height, 1),
+                    new Region(slot, x, y, z + sz, sx, height, 1));
+        }
     }
     private static final class Render {
         final UUID requester;
         final List<Paste> pastes;
-        final List<Region> clearRegions;
+        final List<Region> fillRegions;
+        final BlockData fill;
         final String description;
+        final Runnable done;
         final Set<ChunkPos> tickets = new HashSet<>();
         boolean started, waiting, ready, finishing;
-        boolean clearing = true;
+        boolean filling = true;
         int regionIndex, cursor, pending;
-        Render(UUID requester, List<Paste> pastes, List<Region> clearRegions, String description) {
-            this.requester = requester; this.pastes = pastes; this.clearRegions = clearRegions; this.description = description;
+        /** Fills fillRegions with fill, then pastes; with no pastes, runs done instead of finish. */
+        Render(UUID requester, List<Paste> pastes, List<Region> fillRegions, BlockData fill,
+               String description, Runnable done) {
+            this.requester = requester; this.pastes = pastes; this.fillRegions = fillRegions; this.fill = fill;
+            this.description = description; this.done = done;
         }
-        Region region() { return clearing ? clearRegions.get(regionIndex) : pastes.get(regionIndex).region(); }
+        Region region() { return filling ? fillRegions.get(regionIndex) : pastes.get(regionIndex).region(); }
     }
 }

@@ -42,7 +42,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
-/** Terrain-only collection. No NPC, TNT, animal, or monster is spawned or serialized. */
+/**
+ * Terrain-only collection. No NPC, TNT, animal, or monster is spawned in source
+ * worlds or serialized. Only the preview sandbox primes TNT, on an explicit
+ * /terrain tnt, and nothing from it is saved.
+ */
 public final class TerrainLabPlugin extends JavaPlugin {
     private final Gson gson = new GsonBuilder().setPrettyPrinting()
             .setObjectToNumberStrategy(ToNumberPolicy.LONG_OR_DOUBLE).disableHtmlEscaping().create();
@@ -108,6 +112,7 @@ public final class TerrainLabPlugin extends JavaPlugin {
         try { return worlds.preview(); }
         catch (IOException error) { throw new IllegalStateException("Cannot open preview world: " + error.getMessage(), error); }
     }
+    public void previewSandbox(World world, boolean on) { worlds.setPreviewSandbox(world, on); }
     public void onMain(Runnable action) {
         if (closing) return;
         if (Bukkit.isPrimaryThread()) action.run();
@@ -131,7 +136,7 @@ public final class TerrainLabPlugin extends JavaPlugin {
                 case "resume" -> resume(sender, args);
                 case "status" -> status(sender);
                 case "list" -> list(sender, args);
-                case "show", "gallery", "goto", "leave" -> {
+                case "show", "gallery", "goto", "play", "tnt", "villagerai", "villagerhp", "reset", "leave" -> {
                     if (!(sender instanceof Player player)) throw new IllegalArgumentException("Preview commands must be used in-game.");
                     gallery.command(player, args);
                 }
@@ -147,6 +152,7 @@ public final class TerrainLabPlugin extends JavaPlugin {
         s.sendMessage("/terrain catalog | status | pause | resume [job_id] | list [page]");
         s.sendMessage("/terrain start <seed1,seed2,...> <per-biome> [all|overworld|nether|end] [biome_key]");
         s.sendMessage("/terrain show <sample_id> [core|context] | gallery <page> [core|context] | goto <1..9> | leave");
+        s.sendMessage("/terrain play [slot] | tnt [slot] [fuse_ticks] | villagerai [on|off] | villagerhp [on|off] | reset  (sandbox; never saved to samples)");
         s.sendMessage("Quick check: /terrain start 101 1 overworld minecraft:plains");
     }
 
