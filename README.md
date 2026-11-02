@@ -383,6 +383,8 @@ print(center_block, center_biome, seed)
 /terrain list 1
 /terrain show sample_实际ID core
 /terrain show sample_实际ID context
+/terrain show -random
+/terrain show -random -dropped context
 /terrain gallery 1 core
 /terrain gallery 2 core
 /terrain gallery 1 context
@@ -392,7 +394,9 @@ print(center_block, center_biome, seed)
 
 `list` 每页列出 10 个 ID；`gallery` 每页最多放 9 个样本，编号 1～9。页码从 1 开始，样本按 ID 排序，不保证与采集时间顺序一致。`show` 只展示指定样本，省略模式时默认为 `core`。`goto` 跳到当前页指定位置，`leave` 恢复进入预览前的返回位置和游戏模式。
 
-预览使用单个共享的专用 NORMAL 世界，所有来源维度都摆到约 `Y=96` 的展示高度；实际锚点保留源坐标模 4 的对齐。九宫格中心间隔为 64 格。玩家以 spectator 模式观看（下文的 `play` 沙盒除外），插件分批粘贴方块，并尽量抑制预览中的爆炸、放置破坏、流动和方块更新。换页会更新共享展示，不是每位玩家各有一份独立场景。
+`show -random` 随机挑一个合格样本：列在 `samplingseed.yml`（插件根据全部作业检查点生成的列表）中、且未列入 `samplingseed_unsupported_terrain.yml` 的样本。`show -random -dropped` 只从该文件列出的样本中挑。两者都只挑样本文件仍存在的样本，标志之后可加 `core` 或 `context`，顺序不限。预览开始搭建前，聊天栏显示样本 ID、世界种子、采样中心（维度与 `[x, y, z]`）、地形类型（请求的生物群系；中心计算群系不同时一并显示）以及是否已剔除。上次运行 `check_tnt_support.py -moveout` 之后采集的样本，在该工具将其列出之前都算合格。之后的预览与 `show <sample_id>` 完全相同，`play`、`tnt`、`reset`、`goto` 都作用于挑中的样本。
+
+预览使用单个共享的专用 NORMAL 世界，所有来源维度都摆到约 `Y=96` 的展示高度；实际锚点保留源坐标模 4 的对齐。九宫格中心间隔为 64 格。玩家以 spectator 模式观看（下文的 `play` 沙盒除外），位置在每个样本网格 +x/+z 角外 3 格、顶部上方 5 格，朝向中心；`goto` 使用同一视角。插件分批粘贴方块，并尽量抑制预览中的爆炸、放置破坏、流动和方块更新。换页会更新共享展示，不是每位玩家各有一份独立场景。
 
 保持 biome 格点对齐有助于展示，但预览世界的 seed、绝对坐标、维度和周围环境已变化，所以 F3 的 computed biome、混色、天空与光照仍可能不同。核对原始标签时看样本 metadata 和 `biome_indices`。
 
@@ -475,7 +479,7 @@ context 的 X/Z 可配置为 25～59 的奇数，Y 可配置为 11～63 的奇�
 | `tools/check_sample_overlap.py` | 找出 `samplingseed.yml` 中核心区域重叠的采样中心 |
 | `tools/check_tnt_support.py` | 找出无法放置 TNT 或 1–8 格内没有村民站位的采样中心 |
 | `tools/test_tnt_support.py` | TNT/村民支撑检查工具的自测，只需 Python |
-| `tools/test_continue_exclusions.py` | `-continue` 读取 `samplingseed_unsupported_terrain.yml` 与组合计数的自测 |
+| `tools/test_continue_exclusions.py` | `-continue` 与 `/terrain show -random` 读取 `samplingseed_unsupported_terrain.yml` 的自测：组合计数与随机候选集 |
 | `tools/test_snapshot_io.py` | Java/Python 格式与文件行为自测 |
 | `tools/test_owned_metadata.py` | Paper 世界身份元数据 NBT 解析与拒绝逻辑自测 |
 | `pom.xml` | Java、Paper API 和 Gson 构建依赖 |

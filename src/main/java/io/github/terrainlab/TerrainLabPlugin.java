@@ -131,6 +131,13 @@ public final class TerrainLabPlugin extends JavaPlugin {
         catch (IOException error) { throw new IllegalStateException("Cannot open preview world: " + error.getMessage(), error); }
     }
     public void previewSandbox(World world, boolean on) { worlds.setPreviewSandbox(world, on); }
+    /** Ids listed in samplingseed.yml; safe off the main thread. */
+    public List<String> indexedSampleIds() {
+        if (!samplingIndexReady) throw new IllegalArgumentException("Still indexing earlier jobs; retry in a few seconds.");
+        synchronized (samplingIndex) {
+            return samplingIndex.values().stream().flatMap(List::stream).map(JobState.SampleRef::id).toList();
+        }
+    }
     public void onMain(Runnable action) {
         if (closing) return;
         if (Bukkit.isPrimaryThread()) action.run();
@@ -175,7 +182,8 @@ public final class TerrainLabPlugin extends JavaPlugin {
         s.sendMessage("/terrain startyml <per-biome> [all|overworld|nether|end] [biome_key] [-continue]  (seeds from worldseeds.yml)");
         s.sendMessage("-continue: avoid earlier centres of these seeds and top each seed+biome up to <per-biome> in total;"
                 + " samples in " + SeedFiles.UNSUPPORTED_TERRAIN + " do not count");
-        s.sendMessage("/terrain show <sample_id> [core|context] | gallery <page> [core|context] | goto <1..9> | leave");
+        s.sendMessage("/terrain show <sample_id> [core|context] | show -random [-dropped] [core|context]"
+                + " | gallery <page> [core|context] | goto <1..9> | leave");
         s.sendMessage("/terrain play [slot] | tnt [slot] [fuse_ticks] | villagerai [on|off] | villagerhp [on|off] | reset  (sandbox; never saved to samples)");
         s.sendMessage("Quick check: /terrain start 101 1 overworld minecraft:plains");
     }

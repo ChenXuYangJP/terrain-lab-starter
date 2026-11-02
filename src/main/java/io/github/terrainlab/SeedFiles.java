@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -21,7 +22,8 @@ import java.util.regex.Pattern;
  * worldseeds.yml is user input for /terrain startyml. samplingseed.yml is a view
  * derived from job checkpoints; it is only ever written, never read back.
  * samplingseed_unsupported_terrain.yml is written by tools/check_tnt_support.py and
- * only read here, so that -continue does not count the samples it lists.
+ * only read here, so that -continue does not count the samples it lists and
+ * /terrain show -random can pick from either side of it.
  */
 public final class SeedFiles {
     public static final String WORLD_SEEDS = "worldseeds.yml";
@@ -101,6 +103,13 @@ public final class SeedFiles {
             }
         }
         return ids;
+    }
+
+    /** Ids for /terrain show -random, sorted: listed ids when dropped, otherwise indexed ids not listed; only ids with a sample file. */
+    public static List<String> randomPool(Collection<String> indexed, Set<String> unsupported, Set<String> files, boolean dropped) {
+        Collection<String> candidates = dropped ? unsupported
+                : indexed.stream().filter(id -> !unsupported.contains(id)).toList();
+        return candidates.stream().filter(files::contains).distinct().sorted().toList();
     }
 
     /** Jobs in the given map order, samples in their accepted order, grouped by seed. */

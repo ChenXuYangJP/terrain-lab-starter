@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Test how -continue reads samplingseed_unsupported_terrain.yml and counts bucket samples.
+"""Test how the plugin reads samplingseed_unsupported_terrain.yml: -continue bucket counts
+and the /terrain show -random pools.
 
 Run `mvn package` first, then:
     python3 tools/test_continue_exclusions.py --jdk /path/to/jdk-25
 
 Fixtures are written with the same renderer as tools/check_tnt_support.py -moveout and read
-by the compiled SeedFiles.readSampleIds; JobState.existing is called with exclusions.
+by the compiled SeedFiles.readSampleIds; JobState.existing is called with exclusions, and
+SeedFiles.randomPool with indexed, listed and on-disk sample ids.
 Dependencies are read from the local Maven repository; use --maven-repo when it is
 elsewhere. Nothing is downloaded and Minecraft is not started.
 """
@@ -48,8 +50,14 @@ public final class ContinueExclusionsHarness {
             }
             return;
         }
+        if (args[0].equals("pool")) {
+            // pool <good|dropped> <indexed,...> <unsupported,...> <files,...>
+            System.out.println("POOL=" + String.join(",", SeedFiles.randomPool(ids(args[2]),
+                    Set.copyOf(ids(args[3])), Set.copyOf(ids(args[4])), args[1].equals("dropped"))));
+            return;
+        }
         // count <excluded,...> <seed> <dimension> <biome> <id,seed,dimension,biome,x,y,z>...
-        Set<String> excluded = args[1].isEmpty() ? Set.of() : Set.of(args[1].split(","));
+        Set<String> excluded = Set.copyOf(ids(args[1]));
         List<JobState.SampleRef> samples = new ArrayList<>();
         for (int i = 5; i < args.length; i++) {
             String[] f = args[i].split(",");
@@ -57,6 +65,10 @@ public final class ContinueExclusionsHarness {
                     Integer.parseInt(f[4]), Integer.parseInt(f[5]), Integer.parseInt(f[6])));
         }
         System.out.println("COUNT=" + JobState.existing(samples, excluded, args[2], args[3], args[4]));
+    }
+
+    private static List<String> ids(String csv) {
+        return csv.isEmpty() ? List.of() : List.of(csv.split(","));
     }
 }
 '''
@@ -142,6 +154,17 @@ class ContinueExclusionsTests(unittest.TestCase):
         self.assertEqual(self.run_harness("count", "s2", *bucket, *samples), "COUNT=2")
         self.assertEqual(self.run_harness("count", "s2,s3", *bucket, *samples), "COUNT=1")
         self.assertEqual(self.run_harness("count", "s1,s2,s3,s4,s5", *bucket, *samples), "COUNT=0")
+
+    def test_random_pools_split_on_the_list_and_need_a_sample_file(self) -> None:
+        # s4 is listed but no longer indexed; s5 and s6 have no sample file.
+        indexed, listed, files = "s3,s1,s2,s5", "s2,s4,s6", "s1,s2,s3,s4,s9"
+        self.assertEqual(self.run_harness("pool", "good", indexed, listed, files), "POOL=s1,s3")
+        self.assertEqual(self.run_harness("pool", "dropped", indexed, listed, files), "POOL=s2,s4")
+
+    def test_random_pools_can_be_empty(self) -> None:
+        self.assertEqual(self.run_harness("pool", "good", "", "", "s1"), "POOL=")
+        self.assertEqual(self.run_harness("pool", "dropped", "s1", "", "s1"), "POOL=")
+        self.assertEqual(self.run_harness("pool", "good", "s1", "s1", "s1"), "POOL=")
 
 
 if __name__ == "__main__":

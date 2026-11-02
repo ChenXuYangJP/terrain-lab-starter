@@ -65,10 +65,12 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.HashSet;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 
@@ -84,6 +86,8 @@ public final class Gallery implements Listener {
     private static final int STRIDE = 64;
     private static final int PLAY_HEADROOM = 16;
     private static final int DEFAULT_FUSE_TICKS = 80;
+    private static final String SHOW_USAGE =
+            "Usage: /terrain show <sample_id> [core|context] or /terrain show -random [-dropped] [core|context]";
     private static final BlockData AIR = Material.AIR.createBlockData();
     private static final BlockData BEDROCK = Material.BEDROCK.createBlockData();
     private final TerrainLabPlugin plugin;
@@ -94,6 +98,7 @@ public final class Gallery implements Listener {
     private final Path stateFile;
     private final BukkitTask ticker;
     private final Map<Integer, Location> anchors = new LinkedHashMap<>();
+    private final Map<Integer, Location> cameras = new LinkedHashMap<>();
     private List<Region> previousRegions = new ArrayList<>();
     private List<Region> shown = List.of();
     private List<Region> editBoxes = List.of();
@@ -130,9 +135,11 @@ public final class Gallery implements Listener {
         if (args.length == 0) return false;
         switch (args[0].toLowerCase(java.util.Locale.ROOT)) {
             case "show" -> {
-                if (args.length < 2 || args.length > 3) {
-                    throw new IllegalArgumentException("Usage: /terrain show <sample_id> [core|context]");
+                if (args.length >= 2 && args[1].equalsIgnoreCase("-random")) {
+                    showRandom(player, args);
+                    return true;
                 }
+                if (args.length < 2 || args.length > 3) throw new IllegalArgumentException(SHOW_USAGE);
                 String mode = mode(args, 2);
                 String id = args[1];
                 beginRead(player, () -> List.of(loadSnapshot(id)), mode, "sample " + id);
@@ -169,9 +176,9 @@ public final class Gallery implements Listener {
                 int slot;
                 try { slot = Integer.parseInt(args[1]); }
                 catch (NumberFormatException error) { throw new IllegalArgumentException("Slot must be 1..9."); }
-                Location anchor = anchors.get(slot);
-                if (anchor == null) throw new IllegalArgumentException("This preview has no such slot. Open a gallery first.");
-                enter(player, camera(anchor), GameMode.SPECTATOR);
+                Location camera = cameras.get(slot);
+                if (camera == null) throw new IllegalArgumentException("This preview has no such slot. Open a gallery first.");
+                enter(player, camera, GameMode.SPECTATOR);
                 return true;
             }
             case "play" -> {
@@ -302,6 +309,58 @@ public final class Gallery implements Listener {
         catch (IOException error) { throw new CompletionException(error); }
     }
 
+    /** -dropped and the mode may come in either order, each at most once. */
+    private void showRandom(Player player, String[] args) {
+        boolean dropped = false;
+        String mode = null;
+        for (int i = 2; i < args.length; i++) {
+            String arg = args[i].toLowerCase(java.util.Locale.ROOT);
+            if (arg.equals("-dropped") && !dropped) dropped = true;
+            else if ((arg.equals("core") || arg.equals("context")) && mode == null) mode = arg;
+            else throw new IllegalArgumentException(SHOW_USAGE);
+        }
+        boolean fromDropped = dropped;
+        UUID requester = player.getUniqueId();
+        beginRead(player, () -> List.of(randomSample(requester, fromDropped)), mode == null ? "core" : mode,
+                fromDropped ? "a random dropped sample" : "a random good sample");
+    }
+
+    /**
+     * I/O thread. Good samples are those in samplingseed.yml (the sampling index) that
+     * samplingseed_unsupported_terrain.yml does not list; dropped ones are those it lists.
+     */
+    private TerrainSnapshot randomSample(UUID requester, boolean dropped) {
+        try {
+            Set<String> unsupported = SeedFiles.readSampleIds(plugin.getDataFolder().toPath().resolve(SeedFiles.UNSUPPORTED_TERRAIN));
+            List<String> pool = SeedFiles.randomPool(plugin.indexedSampleIds(), unsupported,
+                    new HashSet<>(store.listIds()), dropped);
+            if (pool.isEmpty()) {
+                throw new IllegalArgumentException(dropped
+                        ? "No sample listed in " + SeedFiles.UNSUPPORTED_TERRAIN + " has a sample file."
+                        : "No good samples to pick from.");
+            }
+            TerrainSnapshot snapshot = store.load(pool.get(ThreadLocalRandom.current().nextInt(pool.size())));
+            List<String> info = sampleInfo(snapshot, dropped, pool.size());
+            // Queued before prepare, so the requester reads this before the preview messages.
+            dispatch(() -> info.forEach(line -> message(requester, line)));
+            return snapshot;
+        } catch (IOException error) { throw new CompletionException(error); }
+    }
+
+    private static List<String> sampleInfo(TerrainSnapshot snapshot, boolean dropped, int poolSize) {
+        Map<String, Object> metadata = snapshot.metadata();
+        List<?> center = (List<?>) metadata.get("source_origin_xyz");
+        Object terrain = metadata.get("requested_biome");
+        Object centerBiome = metadata.get("center_computed_biome");
+        return List.of(
+                "TerrainLab: random " + (dropped ? "dropped" : "good") + " sample (one of " + poolSize + "): " + snapshot.id(),
+                "  world seed: " + metadata.get("seed"),
+                "  sampling center: " + metadata.get("dimension") + " [" + ((Number) center.get(0)).intValue() + ", "
+                        + ((Number) center.get(1)).intValue() + ", " + ((Number) center.get(2)).intValue() + "]",
+                "  terrain type: " + terrain + (Objects.equals(terrain, centerBiome) ? "" : " (center biome " + centerBiome + ")"),
+                "  dropped: " + (dropped ? "yes, listed in " + SeedFiles.UNSUPPORTED_TERRAIN : "no"));
+    }
+
     private void beginRead(Player player, Supplier<List<TerrainSnapshot>> read,
                            String mode, String description) {
         if (closed) throw new IllegalArgumentException("Gallery is shutting down.");
@@ -334,6 +393,7 @@ public final class Gallery implements Listener {
             loadState();
             List<Paste> pastes = new ArrayList<>();
             Map<Integer, Location> nextAnchors = new LinkedHashMap<>();
+            Map<Integer, Location> nextCameras = new LinkedHashMap<>();
             for (int i = 0; i < snapshots.size(); i++) {
                 TerrainSnapshot snapshot = snapshots.get(i);
                 // SnapshotIO.load already validated all arrays and crop consistency
@@ -364,6 +424,7 @@ public final class Gallery implements Listener {
                 pastes.add(new Paste(snapshot, grid, region, anchor, blocks, biomes,
                         grid.blocks(), grid.biomes()));
                 nextAnchors.put(i + 1, anchor);
+                nextCameras.put(i + 1, camera(anchor, grid));
             }
             if (pastes.isEmpty()) throw new IllegalArgumentException("No samples to display.");
             // Persist a conservative union before touching blocks. If a render
@@ -383,7 +444,9 @@ public final class Gallery implements Listener {
                     lastMode = mode;
                     anchors.clear();
                     anchors.putAll(nextAnchors);
-                    enter(current, camera(pastes.get(0).anchor()), GameMode.SPECTATOR);
+                    cameras.clear();
+                    cameras.putAll(nextCameras);
+                    enter(current, cameras.get(1), GameMode.SPECTATOR);
                     for (TextDisplay display : world.getEntitiesByClass(TextDisplay.class)) {
                         if (display.getPersistentDataContainer().has(labelKey, PersistentDataType.BYTE)) display.remove();
                     }
@@ -638,9 +701,13 @@ public final class Gallery implements Listener {
         return new ArrayList<>(result.values());
     }
 
-    private static Location camera(Location anchor) {
-        return new Location(anchor.getWorld(), anchor.getX() + 26.5, anchor.getY() + 24.0,
-                anchor.getZ() + 26.5, 135f, 33f);
+    /** Just outside the grid's +x/+z corner and above its top, looking down at the sample center. */
+    private static Location camera(Location anchor, TerrainSnapshot.Grid grid) {
+        int out = Math.max(grid.minDx() + grid.sizeX(), grid.minDz() + grid.sizeZ()) + 3;
+        int up = grid.minDy() + grid.sizeY() + 5;
+        float pitch = (float) Math.toDegrees(Math.atan2(up, out * Math.sqrt(2)));
+        return new Location(anchor.getWorld(), anchor.getX() + out + 0.5, anchor.getY() + up,
+                anchor.getZ() + out + 0.5, 135f, pitch);
     }
 
     private boolean hasReturn(Player player) {

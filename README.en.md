@@ -383,6 +383,8 @@ This short example only demonstrates reading fields. Validate inputs with the in
 /terrain list 1
 /terrain show sample_<actual_id> core
 /terrain show sample_<actual_id> context
+/terrain show -random
+/terrain show -random -dropped context
 /terrain gallery 1 core
 /terrain gallery 2 core
 /terrain gallery 1 context
@@ -392,7 +394,9 @@ This short example only demonstrates reading fields. Validate inputs with the in
 
 `list` shows 10 IDs per page. `gallery` places at most 9 samples per page, in slots 1–9. Pages start at 1, and samples are sorted by ID, which is not guaranteed to match capture order. `show` displays only the given sample and defaults to `core` when the mode is omitted. `goto` jumps to the given slot on the current page, and `leave` restores the position and game mode you had before entering the preview.
 
-The preview uses a single shared, dedicated NORMAL world. Samples from all source dimensions are placed at a display height of about `Y=96`, and each actual anchor keeps the source coordinates' alignment modulo 4. Grid centers are 64 blocks apart. Players watch in spectator mode (except in the `play` sandbox below). The plugin pastes blocks in batches and suppresses explosions, placing and breaking, flow and block updates in the preview as far as it can. Changing pages updates the shared display; players do not each get a separate scene.
+`show -random` picks one good sample at random: one listed in `samplingseed.yml` (the plugin's view of every job checkpoint) that `samplingseed_unsupported_terrain.yml` does not list. `show -random -dropped` picks one of the samples that file lists. Both pick only samples whose file still exists and accept `core` or `context` after the flags, in any order. Before the preview builds, chat shows the sample ID, its world seed, its sampling center (dimension and `[x, y, z]`), its terrain type (the requested biome, plus the center's computed biome when they differ) and whether it was dropped. Samples collected after the last `check_tnt_support.py -moveout` count as good until that tool lists them. The preview then behaves exactly like `show <sample_id>`: `play`, `tnt`, `reset` and `goto` act on the picked sample.
+
+The preview uses a single shared, dedicated NORMAL world. Samples from all source dimensions are placed at a display height of about `Y=96`, and each actual anchor keeps the source coordinates' alignment modulo 4. Grid centers are 64 blocks apart. Players watch in spectator mode (except in the `play` sandbox below), from 3 blocks outside each sample's grid at its +x/+z corner and 5 blocks above its top, looking at the center; `goto` uses the same view. The plugin pastes blocks in batches and suppresses explosions, placing and breaking, flow and block updates in the preview as far as it can. Changing pages updates the shared display; players do not each get a separate scene.
 
 Keeping biome cells aligned helps the display, but the preview world's seed, absolute coordinates, dimension and surroundings have all changed, so F3's computed biome, color blending, sky and lighting may still differ. To check the original labels, look at the sample metadata and `biome_indices`.
 
@@ -475,7 +479,7 @@ Open the whole `terrain-lab-starter` folder in VS Code and edit the `.java` file
 | `tools/check_sample_overlap.py` | Finds sampling centers in `samplingseed.yml` whose core boxes overlap |
 | `tools/check_tnt_support.py` | Finds sampling centers that cannot hold a TNT or have no villager spot 1–8 blocks away |
 | `tools/test_tnt_support.py` | Self-tests for the TNT/villager support checker, Python only |
-| `tools/test_continue_exclusions.py` | Self-tests for how `-continue` reads `samplingseed_unsupported_terrain.yml` and counts buckets |
+| `tools/test_continue_exclusions.py` | Self-tests for how `-continue` and `/terrain show -random` read `samplingseed_unsupported_terrain.yml`: bucket counts and random pools |
 | `tools/test_snapshot_io.py` | Java/Python format and file behavior self-tests |
 | `tools/test_owned_metadata.py` | Self-tests for parsing and rejecting Paper world identity metadata NBT |
 | `pom.xml` | Java, Paper API and Gson build dependencies |

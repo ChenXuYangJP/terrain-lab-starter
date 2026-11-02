@@ -26,7 +26,8 @@ through, and every other block, including names this table does not know, collid
 
 -moveout moves every flagged sample to samplingseed_unsupported_terrain.yml next to it,
 appending to that file if it exists; -continue jobs read it and do not count its samples
-toward per-biome, while still avoiding their positions. Entries whose sample file is
+toward per-biome, while still avoiding their positions, and /terrain show -random -dropped
+picks from it (plain -random skips its samples). Entries whose sample file is
 missing, invalid or does not match its entry are reported and kept. The plugin regenerates
 samplingseed.yml from the job checkpoints at server start and after every saved sample,
 which brings moved entries back; sample files and job checkpoints are never touched.
@@ -60,7 +61,8 @@ UNSUPPORTED_HEADER = """\
 # 25 x 25 x 11 core, or the core has no villager standing spot within the checked
 # horizontal radius of the center. The plugin never writes this file; /terrain start
 # and startyml -continue read it, so these samples do not count toward per-biome
-# (their positions are still avoided).
+# (their positions are still avoided). /terrain show -random skips these samples and
+# /terrain show -random -dropped picks only from them.
 #
 # center is the block position [x, y, z] of the sample center in that seed's
 # dimension (metadata.source_origin_xyz). biome is the requested terrain type the
